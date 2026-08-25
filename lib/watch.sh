@@ -3,9 +3,16 @@
 # (classify_text, for both the live-transcript and post-exit-probe paths)
 # and on accounts' public surface only (pick_live/candidates_exist,
 # mark_dead_for_class, probe, set_envargs, bump, die_no_live_account,
-# is_uint/is_unum) -- never on accounts'
+# handoff_log, is_uint/is_unum) -- never on accounts'
 # private state files directly, and never a second copy of the LIMIT/AUTH
 # regex family.
+#
+# Output rule (issue #2): run_watched backgrounds `claude` WITHOUT
+# redirecting it, so the child inherits this process's stdout and stderr --
+# the watcher and a full-screen TUI share one terminal for the whole night.
+# Anything printed here is therefore printed into a terminal a human is
+# using. Nothing in this file may write a runnable command to a stream; the
+# durable record goes through accounts.sh's handoff_log().
 #
 # Forbidden dependency (see QA-DOC section 4 rule 4 and the dependency
 # scenario in tests/scenarios): watch's only filesystem reads are transcript
@@ -302,6 +309,7 @@ night_mode() {
   while true; do
     bump "$acct"
     warn "launching as account '$acct' (night mode)"
+    handoff_log "launching as account '$acct' (night mode)${resume_mode:+, $resume_mode}"
     run_watched "$acct" "$resume_mode" "$@"
 
     case "$NIGHT_RESULT" in
@@ -332,6 +340,10 @@ night_mode() {
         else
           resume_mode="continue"
         fi
+        # The morning record. It names the session id, which makes it the one
+        # place holding a command the operator could actually re-run by hand
+        # -- which is exactly why it is written here and not printed.
+        handoff_log "handoff: '$prev' unavailable ($NIGHT_CLASS); resuming under '$acct' with ${NIGHT_SESSION_ID:+--resume $NIGHT_SESSION_ID}${NIGHT_SESSION_ID:--c}"
         ;;
     esac
   done

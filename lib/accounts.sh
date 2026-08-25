@@ -26,9 +26,42 @@ LAST="$ROOT/.last"
 DEADDIR="$ROOT/.dead"
 ALIVEDIR="$ROOT/.alive"
 PROBECWD="$ROOT/.probe"
+HANDOFF_LOG="$ROOT/.handoff.log"
 ALIVE_TTL=900
 PROBE_TIMEOUT=90
 DEFAULT_DEAD=5h
+
+# --- the handoff log: the one channel allowed to carry a runnable command ---
+#
+# README has always promised "you read the handoff log in the morning" and
+# nothing ever wrote one. It exists now because stdout and stderr are NOT
+# that channel and cannot be made into it: under `baton --night` the watcher
+# and its `claude` child share one terminal (run_watched backgrounds the
+# child without redirecting it), so every warn() lands in the terminal a
+# human is actively working in.
+#
+# Measured cost of ignoring that, 2026-08-25 (issue #2): pick_live()'s AUTH
+# branch printed a COMPLETE, RUNNABLE command line -- "run: baton <name>
+# then /login" -- once per account. Three accounts went AUTH inside 14
+# minutes, so three runnable commands appeared at once in one terminal, two
+# were run, and two processes attached to the same session through the shared
+# projects/ symlink. One session was lost. Nothing was wrong with any single
+# line; the bug is that a loop's fan-out multiplied an actionable line and
+# the stream it went to was the operator's hands.
+#
+# The rule this establishes: anything a human could select and press enter on
+# goes to the handoff log and NOWHERE else. A shared stream may say that
+# something happened, and where to read about it, but never what to type.
+#
+# handoff_log MSG -- append one timestamped line. Writes to no stream, ever
+# (not stdout, not stderr, not /dev/tty). A failed append is deliberately
+# silent: a full or read-only disk must not turn an unattended overnight run
+# into an error cascade at 3am, and every caller has already put the
+# non-actionable half of its message on stderr.
+handoff_log() {
+  mkdir -p "$ROOT" 2>/dev/null
+  printf '%s baton: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$HANDOFF_LOG" 2>/dev/null || true
+}
 
 # is_uint / is_unum -- the numeric SHAPE predicates. is_uint is a whole
 # number (durations, handoff counts); is_unum also allows one decimal point
@@ -206,7 +239,14 @@ pick_live() {
     case "$PROBE_CLASS" in
       ALIVE)   PICKED="$a"; return 0 ;;
       LIMIT)   warn "'$a' is at its limit (dead until $(date -r "$(dead_until "$a")" '+%a %l:%M%p' 2>/dev/null)); trying next" ;;
-      AUTH)    warn "'$a' is NOT LOGGED IN -- run: baton $a  then /login. Skipping 1h" ;;
+      # The command to fix this goes to the handoff log, not to stderr. This
+      # loop runs once per ranked account, so on an auth cascade stderr would
+      # otherwise receive one runnable `baton <name>` per dead account -- and
+      # a human who is shown the same shape of command twice runs it twice
+      # (issue #2). stderr keeps the fact and the pointer; the log keeps the
+      # command.
+      AUTH)    warn "'$a' is NOT LOGGED IN; skipping 1h. How to fix it: $HANDOFF_LOG"
+               handoff_log "account '$a' is not logged in. To fix it, run:  baton $a   then /login" ;;
       UNKNOWN) warn "unrecognized probe result for '$a' (network?); launching anyway: ${PROBE_OUT:0:120}"
                PICKED="$a"; return 0 ;;
     esac
