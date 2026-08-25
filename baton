@@ -1,0 +1,287 @@
+#!/usr/bin/env bash
+# baton -- multi-account Claude Code launcher with liveness detection.
+#
+# Why: subscription usage is metered per account server-side; nothing can pool
+# two plans into one. What CAN be local is which account a session launches
+# under. Each account = one dir under ~/.claude-accounts/<name> used as
+# CLAUDE_CONFIG_DIR. "a" is a symlink to ~/.claude (the primary account);
+# every other account symlinks the harness (CLAUDE.md, settings, skills,
+# hooks, projects, state...) back into ~/.claude and keeps only its own
+# credentials and .claude.json, so all accounts run one harness and can
+# resume each other's sessions.
+#
+# Selection, in order:
+#   1. drop accounts marked dead (limit hit; marks expire automatically)
+#   2. rank the rest by launches/weight (weight = <account>/.weight, default 1;
+#      give bigger plans a larger number so they absorb more launches)
+#   3. PROBE the top candidate: a tiny headless `claude -p` under its config
+#      dir. The CLI itself answers with one of a closed set of outcomes:
+#        ALIVE   got a reply -> launch it (result cached 15 min)
+#        LIMIT   "hit your ... limit / resets <time>" -> mark dead until the
+#                parsed reset time (5h fallback), try the next account
+#        AUTH    "Not logged in" -> mark dead 1h with a loud warning, try next
+#        UNKNOWN anything else (network down etc) -> warn and launch anyway,
+#                because an outage affects every account equally
+#      The partition is total on purpose: no outcome falls through silently.
+#   Exact remaining-percentage ranking would need each account's OAuth token
+#   (api.anthropic.com/api/oauth/usage); deliberately not implemented -- this
+#   script never touches credentials. The probe asks the CLI instead.
+#
+# Probe side effects, accepted and bounded: each probe costs a few tokens on
+# the probed account and writes one tiny session transcript, kept out of real
+# project history by running from ~/.claude-accounts/.probe. SessionStart
+# hooks fire on probes too; probe rows are identifiable by that cwd.
+#
+# Usage:
+#   baton [claude args...]        auto-pick live account, launch claude
+#   baton <account> [args...]     force that account (no probe, warns if dead)
+#   baton --next [args...]        mark last-used account dead 5h, then auto-pick
+#   baton --fast [args...]        auto-pick without probing
+#   baton --add <name>            create a new account dir (then: baton <name>,
+#                               /login in the session that opens)
+#   baton --dead [name] [dur]     mark account dead (default: last-used, 5h;
+#                               dur like 90m / 5h / 3d)
+#   baton --revive <name>         clear a dead mark
+#   baton --probe <name>          probe one account, print the class, apply marks
+#   baton --status                accounts, weights, tallies, dead-until, last
+#   baton --pick                  print auto-pick choice (dead-filter + tally
+#                               only; does NOT probe)
+#   baton --reset                 zero tallies
+#
+# State lives in ~/.claude-accounts: .tally, .last, .dead/<name>
+# ("until-epoch reason"), .alive/<name> (mtime = last ALIVE probe). Two
+# simultaneous launches can race the tally rewrite; worst case one launch
+# goes uncounted, which the ratio absorbs on the next pick.
+
+set -u
+ROOT="$HOME/.claude-accounts"
+TALLY="$ROOT/.tally"
+LAST="$ROOT/.last"
+DEADDIR="$ROOT/.dead"
+ALIVEDIR="$ROOT/.alive"
+PROBECWD="$ROOT/.probe"
+ALIVE_TTL=900
+PROBE_TIMEOUT=90
+DEFAULT_DEAD=5h
+# Harness pieces a non-primary account shares with ~/.claude. Credentials and
+# .claude.json stay per-account; everything else is one fleet.
+LINKS="CLAUDE.md MISSION.md settings.json settings.local.json skills hooks agents plugins projects state history.jsonl lib scripts bin agent-memory sessions tasks context-mode comms reminders"
+
+die() { echo "baton: $*" >&2; exit 1; }
+warn() { echo "baton: $*" >&2; }
+now() { date +%s; }
+
+mkdir -p "$ROOT"
+
+accounts=()
+for d in "$ROOT"/*/; do
+  [ -d "$d" ] || continue
+  accounts+=("$(basename "$d")")
+done
+
+# bash 3.2 (macOS default) errors on "${accounts[@]}" for an EMPTY array under
+# set -u, so refuse everything except --add before any expansion is reached.
+if [ ${#accounts[@]} -eq 0 ]; then
+  case "${1:-}" in --add) : ;; *) die "no accounts under $ROOT; run: baton --add <name>" ;; esac
+fi
+
+count_of() { grep "^$1 " "$TALLY" 2>/dev/null | awk '{print $2}' | head -1; }
+weight_of() { cat "$ROOT/$1/.weight" 2>/dev/null || echo 1; }
+
+bump() {
+  local c
+  touch "$TALLY"
+  c=$(count_of "$1"); c=${c:-0}
+  { grep -v "^$1 " "$TALLY" 2>/dev/null; echo "$1 $((c+1))"; } > "$TALLY.tmp" && mv "$TALLY.tmp" "$TALLY"
+  echo "$1" > "$LAST"
+}
+
+dead_until() { awk '{print $1}' "$DEADDIR/$1" 2>/dev/null; }
+is_dead() { local u; u=$(dead_until "$1"); [ -n "$u" ] && [ "$u" -gt "$(now)" ]; }
+mark_dead() { mkdir -p "$DEADDIR"; echo "$2 ${3:-manual}" > "$DEADDIR/$1"; rm -f "$ALIVEDIR/$1"; }
+
+parse_duration() { # 90m / 5h / 3d / raw seconds -> seconds
+  case "$1" in
+    *d) echo $(( ${1%d} * 86400 )) ;;
+    *h) echo $(( ${1%h} * 3600 )) ;;
+    *m) echo $(( ${1%m} * 60 )) ;;
+    *[!0-9]*) die "bad duration '$1' (use 90m / 5h / 3d)" ;;
+    *) echo "$1" ;;
+  esac
+}
+
+# Measured 2026-08-21: setting CLAUDE_CONFIG_DIR at all -- even to the literal
+# default ~/.claude -- makes the CLI read a DIFFERENT credential slot than a
+# login done with the var unset. Both spellings of the primary dir probed
+# "Not logged in" while a bare `claude -p` answered. So the primary account
+# (whose dir physically IS ~/.claude) must launch with the var unset.
+set_envargs() { # $1 account -> ENVARGS array to prefix any claude invocation
+  if [ "$(cd "$ROOT/$1" 2>/dev/null && pwd -P)" = "$HOME/.claude" ]; then
+    ENVARGS=(env -u CLAUDE_CONFIG_DIR)
+  else
+    ENVARGS=(env "CLAUDE_CONFIG_DIR=$ROOT/$1")
+  fi
+}
+
+alive_fresh() {
+  local m
+  m=$(stat -f %m "$ALIVEDIR/$1" 2>/dev/null) || return 1
+  [ $(( $(now) - m )) -lt "$ALIVE_TTL" ]
+}
+
+parse_reset_epoch() { # stdin: limit message -> epoch of "resets 2:30pm (TZ)", or 0
+  python3 -c '
+import re, sys, datetime
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    ZoneInfo = None
+msg = sys.stdin.read()
+m = re.search(r"resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)(?:\s*\(([^)]+)\))?", msg, re.I)
+if not m:
+    print(0); sys.exit()
+h = int(m.group(1)) % 12
+if m.group(3).lower() == "pm":
+    h += 12
+mi = int(m.group(2) or 0)
+tz = None
+if m.group(4) and ZoneInfo:
+    try: tz = ZoneInfo(m.group(4))
+    except Exception: tz = None
+nowt = datetime.datetime.now(tz)
+t = nowt.replace(hour=h, minute=mi, second=0, microsecond=0)
+if t <= nowt:
+    t += datetime.timedelta(days=1)
+print(int(t.timestamp()))
+' 2>/dev/null || echo 0
+}
+
+probe() { # $1 name -> sets PROBE_CLASS + PROBE_OUT; applies dead/alive marks
+  local name="$1" out
+  mkdir -p "$PROBECWD" "$ALIVEDIR"
+  set_envargs "$name"
+  out=$(cd "$PROBECWD" && perl -e 'alarm shift; exec @ARGV' "$PROBE_TIMEOUT" \
+        "${ENVARGS[@]}" claude -p "reply with exactly: ok" 2>&1)
+  PROBE_OUT="$out"
+  if echo "$out" | grep -qiE "hit your .*limit|usage limit|limit reached"; then
+    PROBE_CLASS=LIMIT
+    local reset
+    reset=$(echo "$out" | parse_reset_epoch)
+    [ "$reset" -gt "$(now)" ] 2>/dev/null || reset=$(( $(now) + $(parse_duration $DEFAULT_DEAD) ))
+    mark_dead "$name" "$reset" limit
+  elif echo "$out" | grep -qiE "not logged in|please run /login|invalid api key|authentication"; then
+    PROBE_CLASS=AUTH
+    mark_dead "$name" "$(( $(now) + 3600 ))" auth
+  elif [ -n "$out" ] && echo "$out" | grep -qi "ok"; then
+    PROBE_CLASS=ALIVE
+    touch "$ALIVEDIR/$name"
+    rm -f "$DEADDIR/$name"
+  else
+    PROBE_CLASS=UNKNOWN
+  fi
+}
+
+ranked() { # live accounts, lowest count/weight first; $1 optionally excluded
+  local exclude="${1:-}" a c w
+  for a in "${accounts[@]}"; do
+    [ "$a" = "$exclude" ] && continue
+    is_dead "$a" && continue
+    c=$(count_of "$a"); c=${c:-0}
+    w=$(weight_of "$a")
+    awk -v c="$c" -v w="$w" -v a="$a" 'BEGIN{printf "%.6f %s\n", c/w, a}'
+  done | sort -n | awk '{print $2}'
+}
+
+launch() {
+  local acct="$1"; shift
+  bump "$acct"
+  echo "baton: launching as account '$acct'" >&2
+  set_envargs "$acct"
+  exec "${ENVARGS[@]}" claude "$@"
+}
+
+auto_launch() { # $1 = "probe"|"fast", rest = claude args
+  local mode="$1"; shift
+  local a
+  for a in $(ranked "${BATON_EXCLUDE:-}"); do
+    if [ "$mode" = fast ] || alive_fresh "$a"; then
+      launch "$a" "$@"
+    fi
+    warn "probing '$a'..."
+    probe "$a"
+    case "$PROBE_CLASS" in
+      ALIVE)   launch "$a" "$@" ;;
+      LIMIT)   warn "'$a' is at its limit (dead until $(date -r "$(dead_until "$a")" '+%a %l:%M%p' 2>/dev/null)); trying next" ;;
+      AUTH)    warn "'$a' is NOT LOGGED IN -- run: baton $a  then /login. Skipping 1h" ;;
+      UNKNOWN) warn "unrecognized probe result for '$a' (network?); launching anyway: ${PROBE_OUT:0:120}"
+               launch "$a" "$@" ;;
+    esac
+  done
+  die "no live account. baton --status to see dead marks; baton --revive <name> to override"
+}
+
+case "${1:-}" in
+  --status)
+    last=$(cat "$LAST" 2>/dev/null || echo "-")
+    printf "%-10s %-7s %-9s %-22s %s\n" ACCOUNT WEIGHT LAUNCHES DEAD-UNTIL LAST
+    for a in "${accounts[@]}"; do
+      c=$(count_of "$a"); mark=""; du="-"
+      [ "$a" = "$last" ] && mark="<- last"
+      if is_dead "$a"; then
+        du="$(date -r "$(dead_until "$a")" '+%a %l:%M%p' 2>/dev/null) ($(awk '{print $2}' "$DEADDIR/$a"))"
+      fi
+      printf "%-10s %-7s %-9s %-22s %s\n" "$a" "$(weight_of "$a")" "${c:-0}" "$du" "$mark"
+    done
+    exit 0 ;;
+  --pick)
+    ranked "${2:-}" | head -1; exit 0 ;;
+  --probe)
+    [ -n "${2:-}" ] && [ -d "$ROOT/$2" ] || die "--probe <account>"
+    probe "$2"
+    echo "$2 $PROBE_CLASS"
+    [ "$PROBE_CLASS" = LIMIT ] && echo "dead until: $(date -r "$(dead_until "$2")" 2>/dev/null)"
+    exit 0 ;;
+  --add)
+    name="${2:-}"; [ -n "$name" ] || die "--add <name>"
+    [ -e "$ROOT/$name" ] && die "account '$name' already exists"
+    mkdir -p "$ROOT/$name"
+    for f in $LINKS; do
+      [ -e "$HOME/.claude/$f" ] && ln -sfn "$HOME/.claude/$f" "$ROOT/$name/$f"
+    done
+    cp -p "$HOME/.claude/.claude.json" "$ROOT/$name/.claude.json" 2>/dev/null || true
+    echo "baton: account '$name' created. Log it in:  baton $name   then /login"
+    exit 0 ;;
+  --dead)
+    name="${2:-$(cat "$LAST" 2>/dev/null)}"; [ -n "$name" ] || die "--dead <name> (no last-used account)"
+    [ -d "$ROOT/$name" ] || die "no account '$name'"
+    # die inside $() only exits the subshell, so the failure must be re-raised here
+    dur=$(parse_duration "${3:-$DEFAULT_DEAD}") || exit 1
+    mark_dead "$name" "$(( $(now) + dur ))" manual
+    echo "baton: '$name' dead until $(date -r "$(( $(now) + dur ))")"
+    exit 0 ;;
+  --revive)
+    [ -n "${2:-}" ] || die "--revive <name>"
+    rm -f "$DEADDIR/$2"; echo "baton: '$2' revived"; exit 0 ;;
+  --reset)
+    rm -f "$TALLY" "$LAST"; echo "baton: tallies reset"; exit 0 ;;
+  --next)
+    shift
+    last=$(cat "$LAST" 2>/dev/null || true)
+    if [ -n "$last" ]; then
+      mark_dead "$last" "$(( $(now) + $(parse_duration $DEFAULT_DEAD) ))" next
+      warn "marked '$last' dead for $DEFAULT_DEAD"
+    fi
+    auto_launch probe "$@" ;;
+  --fast)
+    shift
+    auto_launch fast "$@" ;;
+  *)
+    [ ${#accounts[@]} -gt 0 ] || die "no accounts under $ROOT; run: baton --add <name>"
+    if [ $# -ge 1 ] && [ -d "$ROOT/$1" ]; then
+      acct="$1"; shift
+      is_dead "$acct" && warn "'$acct' is marked dead until $(date -r "$(dead_until "$acct")" 2>/dev/null) -- launching anyway (forced)"
+      launch "$acct" "$@"
+    else
+      auto_launch probe "$@"
+    fi ;;
+esac
