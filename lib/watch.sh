@@ -5,11 +5,14 @@
 # mark_dead_for_class, probe, set_envargs, bump, die_no_live_account,
 # is_uint/is_unum) -- never on accounts'
 # private state files directly, and never a second copy of the LIMIT/AUTH
-# regex family.
+# regex family. Since issue #2 it also calls lock's public surface
+# (lock_subject_for_argv/lock_take/lock_release) -- never $LOCKROOT directly,
+# for the same reason it never opens $DEADDIR directly.
 #
 # Forbidden dependency (see QA-DOC section 4 rule 4 and the dependency
 # scenario in tests/scenarios): watch's only filesystem reads are transcript
-# JSONL files under <config-dir>/projects/<slug>/. It never opens
+# JSONL files under <config-dir>/projects/<slug>/, and (through lock.sh, never
+# by hand) the lock records under the accounts root's .locks. It never opens
 # .claude.json, a credentials file, or anything else under an account dir.
 
 # night_knobs -- resolve --night's three numeric env knobs ONCE, before any
@@ -159,6 +162,21 @@ EOF
 run_watched() {
   local name="$1" resume_mode="$2"; shift 2
   set_envargs "$name"
+
+  # Single-writer guard (issue #2). Taken BEFORE the temp files below, so a
+  # refusal leaves nothing behind. Keyed on the session id this launch will
+  # actually open: the handoff's own resume id when night_mode carried one,
+  # otherwise an explicit --resume the operator passed through to claude.
+  # A cold start and `-c` have no id yet and are deliberately not guarded --
+  # lib/lock.sh explains why a guessed key would be worse than none. The
+  # message on refusal lives in lock_take, so this adds no output site here.
+  local lock_subject=""
+  case "$resume_mode" in
+    resume:*) lock_subject="session-${resume_mode#resume:}" ;;
+    *)        lock_subject=$(lock_subject_for_argv "$@" || true) ;;
+  esac
+  [ -n "$lock_subject" ] && lock_take "$lock_subject" "baton --night as '$name' (in $PWD)"
+
   local tdir; tdir=$(transcript_dir_for "$CONFIG_DIR")
   mkdir -p "$tdir"
 
@@ -228,6 +246,11 @@ run_watched() {
             # re-run work that baton itself deliberately stopped. The handoff
             # that follows opens its own unit with its own receipts.
             runs_record_complete "$unit" "rotated-$class"
+            # The receipt is written BEFORE the lock is dropped: the moment
+            # the lock is free another process may claim this session, and it
+            # must not be able to do so while this child's ending is still
+            # unrecorded.
+            lock_release "$lock_subject"
             NIGHT_RESULT=ROTATE
             NIGHT_CLASS="$class"
             NIGHT_TEXT="$line"
@@ -251,6 +274,7 @@ EOF
   # before anything else can fail. It is the only evidence that closes a unit,
   # so it is never written from an assumption about how the child ended.
   runs_record_complete "$unit" "$code"
+  lock_release "$lock_subject"
   probe "$name"
   case "$PROBE_CLASS" in
     LIMIT|AUTH)

@@ -22,9 +22,11 @@
 # the assignment explicitly allows it. Nothing in lib.sh asserts anything;
 # every `check` call below is written for this script.
 #
-# There are exactly 14 assertion blocks, one per Gherkin scenario in
+# There are 14 assertion blocks, one per Gherkin scenario in
 # features/failover.feature (Background excluded, and per the QA assignment,
-# the post-review hardening scenarios 15-26 excluded). Two post-review
+# the post-review hardening scenarios 15-26 excluded), plus block 15, which
+# has no Gherkin row: issue #2's kill-and-double-relaunch acceptance for the
+# single-writer session lock. Two post-review
 # amendments are respected explicitly, not silently:
 #   - D6 (amended): --night watches transcripts for GROWTH, not for a new
 #     file appearing, so BATON_SESSION_WAIT_SECS no longer gates anything.
@@ -682,6 +684,91 @@ unset BATON_ACCOUNTS_ROOT
 block_end
 
 # ============================================================================
+# Block 15 -- issue #2 acceptance: "a kill-and-double-relaunch QA scenario
+# proves exactly one survivor claims the session".
+#
+# The only block with no Gherkin row: this is not failover behavior, it is the
+# guard that stops failover's shared projects/ tree from letting two processes
+# open one session. It runs LAST, after block 14 has finished with the real
+# HOME, and re-shadows HOME through fresh_root like every other block.
+#
+# The two launches fire back to back with no synchronization on purpose. The
+# acceptance is not "the second one is refused" (tests/scenarios/29 pins that,
+# against a holder already established); it is that under a GENUINE race
+# exactly ONE of them ends up running claude. `mkdir` is what makes that true
+# -- the one step both processes reach and only one can complete. Which one
+# wins is deliberately not asserted, because nothing should depend on it.
+# ============================================================================
+block_begin "15 double relaunch: exactly one survivor claims the session" "issue #2 acceptance"
+fresh_root
+QA_LOCKROOT="$BATON_ACCOUNTS_ROOT/.locks"
+
+write_behavior a <<'EOF'
+STEP_EXIT=(0 0)
+STEP_BLOCK=(1 0)
+STEP_BLOCK_EXIT=(143 143)
+EOF
+
+"$BATON_BIN" a --resume sess-qa-race >"$SCRATCH/r1.out" 2>"$SCRATCH/r1.err" &
+R1=$!
+"$BATON_BIN" a --resume sess-qa-race >"$SCRATCH/r2.out" 2>"$SCRATCH/r2.err" &
+R2=$!
+
+waited=0
+alive=2
+while :; do
+  alive=0
+  kill -0 "$R1" 2>/dev/null && alive=$((alive + 1))
+  kill -0 "$R2" 2>/dev/null && alive=$((alive + 1))
+  [ "$alive" -le 1 ] && break
+  sleep 0.2
+  waited=$((waited + 1))
+  [ "$waited" -gt 100 ] && break
+done
+check "exactly one of the two racing relaunches is still running" $([ "$alive" -eq 1 ]; echo $?)
+
+if kill -0 "$R1" 2>/dev/null; then
+  SURVIVOR=$R1; LOSER=$R2; LOSER_ERR="$SCRATCH/r2.err"
+else
+  SURVIVOR=$R2; LOSER=$R1; LOSER_ERR="$SCRATCH/r1.err"
+fi
+wait "$LOSER" 2>/dev/null
+loser_rc=$?
+
+check "the loser exited 3 (refused), not 0 and not a crash" $([ "$loser_rc" -eq 3 ]; echo $?)
+check "the loser's message names the survivor's pid" $(grep -q "$SURVIVOR" "$LOSER_ERR"; echo $?)
+check "claude was invoked exactly ONCE across both relaunches" \
+  $([ "$(invocation_count a)" -eq 1 ]; echo $?)
+owner_pid=$(awk '$1=="pid"{print $2; exit}' "$QA_LOCKROOT/session-sess-qa-race/owner" 2>/dev/null)
+check "the lock's recorded owner is the survivor" $([ "$owner_pid" = "$SURVIVOR" ]; echo $?)
+
+"$BATON_BIN" --locks >"$SCRATCH/qa-locks.out" 2>&1
+qa_locks_rc=$?
+check "baton --locks exits 0, having inspected more than zero lock subjects" \
+  $([ "$qa_locks_rc" -eq 0 ]; echo $?)
+check "baton --locks states the count it inspected" \
+  $(grep -qE "inspected [1-9][0-9]* lock subject" "$SCRATCH/qa-locks.out"; echo $?)
+check "baton --locks calls the survivor's lock live" \
+  $(grep "session-sess-qa-race" "$SCRATCH/qa-locks.out" | grep -q "live"; echo $?)
+
+# Kill the survivor the way a crash would, and prove the session is not
+# wedged: a lock whose holder is gone must be reclaimable, or the first crash
+# of the night costs the operator that session permanently.
+kill -KILL "$SURVIVOR" 2>/dev/null
+wait "$SURVIVOR" 2>/dev/null
+check "the dead survivor's lock is still on disk (nothing tidied it for us)" \
+  $([ -d "$QA_LOCKROOT/session-sess-qa-race" ]; echo $?)
+
+"$BATON_BIN" a --resume sess-qa-race >"$SCRATCH/r3.out" 2>"$SCRATCH/r3.err"
+relaunch_rc=$?
+check "relaunching after the crash reclaims the session and runs" $([ "$relaunch_rc" -eq 0 ]; echo $?)
+check "that relaunch really reached claude (second invocation)" \
+  $([ "$(invocation_count a)" -eq 2 ]; echo $?)
+
+cleanup_root
+block_end
+
+# ============================================================================
 # Tally
 # ============================================================================
 total=$(grep -cE '^(PASS|FAIL) block' "$QA_RESULTS" 2>/dev/null)
@@ -691,10 +778,17 @@ failed=$(grep -c '^FAIL block' "$QA_RESULTS" 2>/dev/null)
 echo ""
 echo "----"
 grep '^FAIL block' "$QA_RESULTS" 2>/dev/null || true
-echo "QA BLOCKS: $total  PASS: $passed  FAIL: $failed  (14 expected: one per Gherkin scenario in features/failover.feature, background excluded, scenarios 15-26 excluded per assignment)"
+# The expected count is asserted, not just printed: a block that dies before
+# block_end writes no result line, and a missing line is invisible in a
+# pass/fail tally -- the workflow would simply report one fewer block and
+# still exit 0. 14 of these are the Gherkin scenarios; block 15 is issue #2's
+# double-relaunch acceptance, which has no Gherkin row. Adding a block means
+# bumping this number in the same commit.
+QA_EXPECTED_BLOCKS=15
+echo "QA BLOCKS: $total  PASS: $passed  FAIL: $failed  ($QA_EXPECTED_BLOCKS expected: one per Gherkin scenario in features/failover.feature (background excluded, scenarios 15-26 excluded per assignment), plus block 15 for issue #2)"
 
-if [ "$total" -ne 14 ]; then
-  echo "qa_failover: expected exactly 14 assertion blocks, got $total" >&2
+if [ "$total" -ne "$QA_EXPECTED_BLOCKS" ]; then
+  echo "qa_failover: expected exactly $QA_EXPECTED_BLOCKS assertion blocks, got $total" >&2
   exit 1
 fi
 

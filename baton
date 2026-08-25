@@ -47,6 +47,12 @@
 #   baton --pick                  print auto-pick choice (dead-filter + tally
 #                               only; does NOT probe)
 #   baton --reset                 zero tallies
+#   baton --login <name>          launch that account holding the machine-wide
+#                               login lock, so two /login flows can never
+#                               overlap and rotate each other's OAuth token
+#   baton --locks                 report every lock subject and its holder.
+#                               Exits 0 (found >0), 1 (found 0), 2 (could not
+#                               inspect the lock root -- never a pass)
 #   baton --night [claude args...]  unattended mode: auto-pick like plain
 #                               baton, but watch the live transcript for a
 #                               limit/auth hit and hand off to the next
@@ -54,7 +60,8 @@
 #                               features/failover.feature for the full spec.
 #
 # State lives in ~/.claude-accounts: .tally, .last, .dead/<name>
-# ("until-epoch reason"), .alive/<name> (mtime = last ALIVE probe). Two
+# ("until-epoch reason"), .alive/<name> (mtime = last ALIVE probe),
+# .locks/<subject>/owner (the single-writer guard; see lib/lock.sh). Two
 # simultaneous launches can race the tally rewrite; worst case one launch
 # goes uncounted, which the ratio absorbs on the next pick.
 #
@@ -93,6 +100,11 @@ now() { date +%s; }
 
 . "$SCRIPT_DIR/lib/detect.sh"
 . "$SCRIPT_DIR/lib/accounts.sh"
+# lock.sh reads $ROOT (accounts.sh) and baton's die/warn/now, so it is sourced
+# after accounts and before any dispatch. It is NOT part of the --night-only
+# tier: the interactive launch paths below need the same guard, and the
+# 2026-08-25 incident was two interactive relaunches, not two watchers.
+. "$SCRIPT_DIR/lib/lock.sh"
 # watch.sh is sourced ONLY by the --night branch below (QA-DOC section 4 rule
 # 5: existing flags depend on accounts, never on watch). It defines functions
 # and nothing else, so sourcing it at dispatch time -- one statement before
@@ -162,6 +174,22 @@ case "${1:-}" in
     rm -f "$DEADDIR/$2"; echo "baton: '$2' revived"; exit 0 ;;
   --reset)
     rm -f "$TALLY" "$LAST"; echo "baton: tallies reset"; exit 0 ;;
+  --locks)
+    # Exits 0 (found >0), 1 (found 0), or 2 (could not inspect) -- see the
+    # exit-code table in lib/lock.sh. Never collapses the last two.
+    lock_report; exit $? ;;
+  --login)
+    name="${2:-}"; [ -n "$name" ] || die "--login <account>"
+    is_account "$name" || die "no account '$name'"
+    shift 2
+    # One login flow at a time, machine-wide (issue #2 root cause 3): two
+    # overlapping OAuth flows rotate each other's refresh token, and the CLI's
+    # own .oauth_refresh.lock sits next to ONE credentials store, so it cannot
+    # see a second CLAUDE_CONFIG_DIR logging into the same Anthropic account.
+    # launch() execs, so this pid becomes the claude process and the lock is
+    # held for exactly the life of the login session.
+    lock_take login "/login flow for account '$name' (in $PWD)"
+    launch "$name" "$@" ;;
   --next)
     shift
     last=$(cat "$LAST" 2>/dev/null || true)
@@ -169,9 +197,11 @@ case "${1:-}" in
       mark_dead "$last" "$(( $(now) + $(parse_duration $DEFAULT_DEAD) ))" next
       warn "marked '$last' dead for $DEFAULT_DEAD"
     fi
+    lock_guard_launch "$@"
     auto_launch probe "$@" ;;
   --fast)
     shift
+    lock_guard_launch "$@"
     auto_launch fast "$@" ;;
   --night)
     shift
@@ -195,8 +225,10 @@ case "${1:-}" in
     if [ $# -ge 1 ] && is_account "$1"; then
       acct="$1"; shift
       is_dead "$acct" && warn "'$acct' is marked dead until $(date -r "$(dead_until "$acct")" 2>/dev/null) -- launching anyway (forced)"
+      lock_guard_launch "$@"
       launch "$acct" "$@"
     else
+      lock_guard_launch "$@"
       auto_launch probe "$@"
     fi ;;
 esac

@@ -62,6 +62,9 @@ baton --status          # accounts, weights, launches, dead-until
 baton --dead [n] [dur]  # mark dead (90m / 5h / 3d)
 baton --revive <name>   # clear a dead mark
 baton --pickup          # what the last session left behind, as JSON
+baton --login <name>    # log an account in, holding the machine-wide login
+                        # lock so two OAuth flows can't overlap
+baton --locks           # who currently holds which session lock
 ```
 
 ## Picking up after a crash (`baton --pickup`)
@@ -130,6 +133,63 @@ Give a bigger plan more launches: `echo 3 > ~/.claude-accounts/big/.weight`.
 | `BATON_WATCH_INTERVAL` | `5` | seconds between transcript polls |
 | `BATON_MAX_HANDOFFS` | `3` | account switches per run before giving up |
 | `BATON_SESSION_WAIT_SECS` | `30` | accepted and validated, but inert: the watcher now spots the running session by which transcript file grows, so it never waits for one to appear |
+
+## One writer per session
+
+Every account symlinks `projects/` back into your primary `~/.claude`. That is
+the feature -- it is what lets account `b` resume a session account `a`
+started. The cost is that a session id is a name *every* account can open, and
+`claude` will not stop you opening one twice: it locks git worktrees, OAuth
+refresh and its own storage stream, but nothing refuses a second
+`--resume <id>`. Do it anyway and one process absorbs the session while the
+other dies -- which is what happened here on 2026-08-25, after baton itself
+printed two runnable relaunch lines into one terminal and both were run. The
+printing is fixed separately; this is the guard that would have refused the
+second launch however the two commands arrived.
+
+So baton takes a lock first. Before any launch carrying `--resume <id>` -- the
+interactive path, and each `--night` handoff -- it creates
+`~/.claude-accounts/.locks/session-<id>/` with `mkdir` (atomic: the loser's
+`mkdir` fails, so there is no test-then-write window) and records its own pid
+and that pid's start time. A second launch of the same id refuses, names the
+pid that holds it, and exits 3 without ever running `claude`:
+
+```
+$ baton --resume 0f3c...  # while another one is already open on it
+baton: refusing to launch 'session-0f3c...': it is already held by pid 40021,
+which is still running. Two processes on one session is what destroys it --
+go back to pid 40021, or wait for it to exit. See: baton --locks
+```
+
+Because baton `exec`s `claude`, the pid in the lock *is* the claude process,
+so the lock lasts exactly as long as the session and needs no cleanup step
+that a crash could skip. A holder that died leaves a lock whose pid is gone
+(or whose pid has been recycled into a process with a different start time);
+either way the next launch reclaims it, so a crash cannot wedge baton.
+
+`baton --locks` reports every lock and how many it inspected. It has three
+answers, not two, and the third is the point:
+
+| Exit | Meaning |
+|---|---|
+| 0 | inspected the lock root, found one or more subjects |
+| 1 | inspected the lock root, found **zero** subjects |
+| 2 | **could not inspect** -- the lock root is missing or unreadable |
+
+2 is never a pass and never means "nothing is locked". A check that opened
+nothing has cleared nothing, and a guard that reports success on a run where
+it never executed is worse than no guard.
+
+`baton --login <name>` launches an account holding a single machine-wide
+`login` lock, so two `/login` flows can never overlap. They rotate each
+other's OAuth refresh token when they do, which is the likeliest cause of the
+three-account `auth` cascade this fix came out of; `claude`'s own
+`.oauth_refresh.lock` sits next to *one* credentials store and cannot see a
+second `CLAUDE_CONFIG_DIR` logging into the same Anthropic account.
+
+Not covered: a cold start and `baton -c`. Neither carries a session id at
+launch -- the id only becomes knowable once a transcript grows -- and a lock
+keyed on a guess is worse than none.
 
 ## How the limit is detected
 
