@@ -192,6 +192,15 @@ run_watched() {
   fi
   local pid=$!
 
+  # Durable receipts (baton#3). Written the instant the pid exists, because
+  # that is the only moment anything knows it: if this process dies here, the
+  # child is reparented to launchd and keeps running, and the receipt is then
+  # the ONLY evidence distinguishing that live orphan from a unit that never
+  # started. The two mktemp files above are still scratch and still deleted;
+  # these are not.
+  local unit="night-$(date -u +%Y%m%dT%H%M%SZ)-$$-$name"
+  runs_record_start "$unit" "$pid" "$(runs_fingerprint "$pid")" "claude ${resume_args[*]-} $*"
+
   local interval="$NIGHT_INTERVAL"
   local cursors="" f size offset class line
 
@@ -213,6 +222,12 @@ run_watched() {
             kill -TERM "$pid" 2>/dev/null
             wait "$pid" 2>/dev/null
             rm -f "$ref" "$snap"
+            # This child's ending was OBSERVED (we ended it), so the unit
+            # closes here. Without this receipt a rotated-away child would
+            # read as dead-partial forever, and every restart would offer to
+            # re-run work that baton itself deliberately stopped. The handoff
+            # that follows opens its own unit with its own receipts.
+            runs_record_complete "$unit" "rotated-$class"
             NIGHT_RESULT=ROTATE
             NIGHT_CLASS="$class"
             NIGHT_TEXT="$line"
@@ -232,6 +247,10 @@ EOF
   rm -f "$ref" "$snap"
   wait "$pid"
   local code=$?
+  # The completion receipt is written from the code wait() actually returned,
+  # before anything else can fail. It is the only evidence that closes a unit,
+  # so it is never written from an assumption about how the child ended.
+  runs_record_complete "$unit" "$code"
   probe "$name"
   case "$PROBE_CLASS" in
     LIMIT|AUTH)

@@ -175,8 +175,21 @@ case "${1:-}" in
     auto_launch fast "$@" ;;
   --night)
     shift
+    # runs.sh before watch.sh: the watcher records a receipt the moment it
+    # has a pid, so the recorder has to be defined before the launcher runs.
+    . "$SCRIPT_DIR/lib/runs.sh"
     . "$SCRIPT_DIR/lib/watch.sh"
     night_mode "$@" ;;
+  --pickup)
+    # Read-only: what did the last session leave behind. Deliberately does
+    # NOT source watch.sh -- pickup answers a question about dead runs and
+    # must never be able to start one (the same forbidden direction QA-DOC
+    # section 4 rule 5 draws for the existing flags).
+    shift
+    . "$SCRIPT_DIR/lib/pickup.sh"
+    . "$SCRIPT_DIR/lib/runs.sh"
+    runs_project
+    exit $? ;;
   *)
     [ ${#accounts[@]} -gt 0 ] || die "no accounts under $ROOT; run: baton --add <name>"
     if [ $# -ge 1 ] && is_account "$1"; then

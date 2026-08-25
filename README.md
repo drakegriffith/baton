@@ -61,7 +61,39 @@ baton --fast            # auto-pick without the liveness probe
 baton --status          # accounts, weights, launches, dead-until
 baton --dead [n] [dur]  # mark dead (90m / 5h / 3d)
 baton --revive <name>   # clear a dead mark
+baton --pickup          # what the last session left behind, as JSON
 ```
+
+## Picking up after a crash (`baton --pickup`)
+
+A `--night` child is a separate process group. When baton dies underneath it
+-- a dropped connection, a closed terminal, a host restart -- the child is
+reparented and keeps running, and nothing ever reattaches to it. Logging back
+in does not resume it: `/login` only writes credentials, and `claude --resume`
+restores a transcript, not a process.
+
+So `--night` writes two receipts per child, under `~/.claude-accounts/.runs/`:
+one at launch carrying the pid, the process fingerprint and the command, and
+one at exit carrying the code `wait()` returned. `--pickup` reads them back,
+re-probes each pid, and prints one JSON board:
+
+| status | what it means | action |
+|---|---|---|
+| `done` | a completion receipt exists; its exit code is on disk | `none` |
+| `orphan-running` | still alive under a matching fingerprint | `monitor` |
+| `dead-partial` | started, never finished, pid confirmed gone | `reconcile` |
+| `never-started` | no launch was ever recorded | `dispatch` |
+| `unknown` | evidence missing or contradictory | `reconcile` |
+
+Exit codes: `0` everything resolved, `1` something needs a decision, `2`
+**could not inspect** -- no receipts were readable. A 2 is not a clean board.
+A sweep that inspected zero units found nothing because it looked at nothing,
+and treating that as success is how a second copy gets launched on top of a
+live orphan.
+
+Only `never-started` is safe to re-run automatically. The fingerprint is what
+makes `orphan-running` trustworthy: a pid alone can be reused by an unrelated
+process, so the recorded start time and command line are matched too.
 
 Give a bigger plan more launches: `echo 3 > ~/.claude-accounts/big/.weight`.
 
