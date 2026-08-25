@@ -53,14 +53,41 @@ DEFAULT_DEAD=5h
 # goes to the handoff log and NOWHERE else. A shared stream may say that
 # something happened, and where to read about it, but never what to type.
 #
-# handoff_log MSG -- append one timestamped line. Writes to no stream, ever
-# (not stdout, not stderr, not /dev/tty). A failed append is deliberately
-# silent: a full or read-only disk must not turn an unattended overnight run
-# into an error cascade at 3am, and every caller has already put the
-# non-actionable half of its message on stderr.
+# handoff_log MSG -- append one timestamped line to the handoff log.
+#
+# On SUCCESS it writes to no stream at all: not stdout, not stderr, not
+# /dev/tty. That is the contract the rest of this file depends on.
+#
+# The braces are load-bearing, not style. `printf ... >> "$LOG" 2>/dev/null`
+# binds the 2>/dev/null to PRINTF, but a `>>` that cannot be opened fails
+# before printf is ever reached, and bash reports that failed redirection on
+# the SHELL's stderr -- with an "accounts.sh: line N:" prefix. Measured: with
+# the log path unwritable, an AUTH cascade emitted one
+# "accounts.sh: line 63: ...: Is a directory" per account, straight into the
+# terminal this function exists to keep clean, leaking an internal file:line
+# on the way. `{ ...; } 2>/dev/null` puts the redirection INSIDE the scope
+# being silenced and is genuinely quiet. Both "Is a directory" and
+# "Permission denied" were reproduced and are covered by scenario 29.
+#
+# On FAILURE it is quiet but not silent, and the difference matters: a failed
+# append means the operator's instruction is GONE. It is not on stderr (this
+# whole change moved it off), and it is not in the log (the append failed),
+# so silence would be data loss no one is told about. So exactly ONE
+# plain-language notice is emitted per process, naming the path and what was
+# lost. Once, not per call: the caller is a loop over accounts, and a
+# per-iteration notice would rebuild the very cascade this change removed.
+# The notice deliberately contains no command -- being unable to record an
+# instruction is not a reason to start printing instructions.
+HANDOFF_LOG_BROKEN=""
 handoff_log() {
   mkdir -p "$ROOT" 2>/dev/null
-  printf '%s baton: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$HANDOFF_LOG" 2>/dev/null || true
+  if { printf '%s baton: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$HANDOFF_LOG"; } 2>/dev/null; then
+    return 0
+  fi
+  [ -n "$HANDOFF_LOG_BROKEN" ] && return 0
+  HANDOFF_LOG_BROKEN=1
+  echo "baton: WARNING -- the handoff log $HANDOFF_LOG could not be written, so this run's instructions were NOT recorded anywhere. Fix that path to get them back. (Shown once.)" >&2
+  return 0
 }
 
 # is_uint / is_unum -- the numeric SHAPE predicates. is_uint is a whole

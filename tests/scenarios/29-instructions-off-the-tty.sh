@@ -180,5 +180,50 @@ pointed=$(count_matching 'handoff\.log' "$SCRATCH/night.err")
 scenario_check "stderr points at the handoff log without printing a command (got $pointed)" \
   $([ "$pointed" -ge 1 ]; echo $?)
 
+# --- claim 5: an UNWRITABLE log fails quietly and audibly, not noisily -----
+# The whole point of this change is that stderr is a stream the operator (and
+# a full-screen TUI) share, so the code that moves text OFF it must not put
+# raw shell diagnostics back ON it. `printf ... >> "$LOG" 2>/dev/null` does
+# exactly that: the 2>/dev/null binds to printf, while bash reports a FAILED
+# REDIRECTION on the shell's own stderr before printf ever runs -- one
+# "accounts.sh: line N: ...: Is a directory" per account, per poll, all night.
+# That is the same per-iteration shell-error cascade lib/watch.sh's night_knobs
+# header documents as measured harm.
+#
+# But silence alone is the wrong contract: a failed append means the COMMAND
+# IS LOST, and stderr no longer carries it either. So the requirement is
+# three-part -- no raw shell error, no repetition, and exactly one plain-
+# language notice that the instructions were not recorded.
+rm -f "$BATON_ACCOUNTS_ROOT/.dead/a" "$BATON_ACCOUNTS_ROOT/.dead/b" "$BATON_ACCOUNTS_ROOT/.dead/d"
+rm -f "$HANDOFF_LOG_PATH"
+mkdir -p "$HANDOFF_LOG_PATH"   # a directory can never be appended to
+"$BATON_BIN" --night >"$SCRATCH/broken.out" 2>"$SCRATCH/broken.err"
+
+broken_subjects=$(count_matching '' "$SCRATCH/broken.err")
+if [ "$broken_subjects" -eq 0 ]; then
+  echo "29-instructions-off-the-tty: COULD NOT INSPECT -- unwritable-log run emitted 0 lines" >&2
+  cleanup_root
+  exit 2
+fi
+# Positive control for THIS section: the cascade must actually have run again.
+reauth=0
+for acct in a b d; do
+  [ "$(dead_reason_of "$acct")" = auth ] && reauth=$((reauth + 1))
+done
+scenario_check "positive control: unwritable-log run still walked all 3 accounts (got $reauth)" \
+  $([ "$reauth" -eq 3 ]; echo $?)
+
+rawerr=$(count_matching 'accounts\.sh: line [0-9]|Is a directory|Permission denied' "$SCRATCH/broken.err")
+scenario_check "unwritable log leaks no raw shell error to stderr (got $rawerr)" \
+  $([ "$rawerr" -eq 0 ]; echo $?)
+
+notice=$(count_matching 'could not be written' "$SCRATCH/broken.err")
+scenario_check "operator is told once that instructions were not recorded (got $notice)" \
+  $([ "$notice" -eq 1 ]; echo $?)
+
+noticecmd=$(count_matching 'run: baton |baton [A-Za-z0-9_-]+ +then /login' "$SCRATCH/broken.err")
+scenario_check "the unwritable-log notice is itself not pasteable (got $noticecmd)" \
+  $([ "$noticecmd" -eq 0 ]; echo $?)
+
 cleanup_root
 scenario_end

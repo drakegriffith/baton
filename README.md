@@ -18,12 +18,20 @@ using runs out mid-session. `baton` handles both:
 
 ### Where instructions go
 
-`~/.claude-accounts/.handoff.log` is the handoff log, and it is the only
-place baton writes a command you are meant to type. Handoffs, and any
-"this account needs `/login`" instruction, are appended there with a
-timestamp.
+`~/.claude-accounts/.handoff.log` is the handoff log. Every instruction
+baton produces *on its own initiative* -- account handoffs, and the
+"this account needs `/login`" line the liveness probe emits per dead
+account -- is appended there with a timestamp, and is not printed.
 
-They are deliberately **not** printed to stdout or stderr. Under `--night`
+One deliberate exception, stated because the rule above would otherwise be
+false: `baton --add <name>` prints its `baton <name>` / `/login` follow-up
+straight to stdout. That line is a synchronous answer to a command you just
+typed yourself, for one named account, and it cannot arrive three at a time
+while you are looking elsewhere -- the multiplication that caused the
+incident is absent. The rule is about unprompted output, not about every
+`/login` string in the program.
+
+Instructions are deliberately **not** printed to stdout or stderr. Under `--night`
 the watcher and its `claude` child share one terminal, so a printed command
 lands in the terminal you are working in -- and when several accounts fail
 at once, several runnable commands appear at once. That is how a session got
