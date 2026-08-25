@@ -47,29 +47,43 @@
 #   baton --pick                  print auto-pick choice (dead-filter + tally
 #                               only; does NOT probe)
 #   baton --reset                 zero tallies
+#   baton --night [claude args...]  unattended mode: auto-pick like plain
+#                               baton, but watch the live transcript for a
+#                               limit/auth hit and hand off to the next
+#                               account instead of stopping. See
+#                               features/failover.feature for the full spec.
 #
 # State lives in ~/.claude-accounts: .tally, .last, .dead/<name>
 # ("until-epoch reason"), .alive/<name> (mtime = last ALIVE probe). Two
 # simultaneous launches can race the tally rewrite; worst case one launch
 # goes uncounted, which the ratio absorbs on the next pick.
+#
+# Env overrides (all optional, all no-ops on default behavior when unset):
+#   BATON_ACCOUNTS_ROOT      accounts root (default: $HOME/.claude-accounts)
+#   BATON_WATCH_INTERVAL     --night poll interval, seconds (default: 5)
+#   BATON_MAX_HANDOFFS       --night handoff cap per run (default: 3)
+#   BATON_SESSION_WAIT_SECS  --night max wait for a transcript file before
+#                            falling back to `-c` instead of `--resume <id>`
+#                            (default: 30)
+#
+# Implementation lives in lib/: detect.sh (pure text classification, shared
+# by probe() and the --night watcher so they can't drift), accounts.sh
+# (state + selection + probing), watch.sh (--night's child-process control).
 
 set -u
-ROOT="$HOME/.claude-accounts"
-TALLY="$ROOT/.tally"
-LAST="$ROOT/.last"
-DEADDIR="$ROOT/.dead"
-ALIVEDIR="$ROOT/.alive"
-PROBECWD="$ROOT/.probe"
-ALIVE_TTL=900
-PROBE_TIMEOUT=90
-DEFAULT_DEAD=5h
-# Harness pieces a non-primary account shares with ~/.claude. Credentials and
-# .claude.json stay per-account; everything else is one fleet.
-LINKS="CLAUDE.md MISSION.md settings.json settings.local.json skills hooks agents plugins projects state history.jsonl lib scripts bin agent-memory sessions tasks context-mode comms reminders"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 
 die() { echo "baton: $*" >&2; exit 1; }
 warn() { echo "baton: $*" >&2; }
 now() { date +%s; }
+
+. "$SCRIPT_DIR/lib/detect.sh"
+. "$SCRIPT_DIR/lib/accounts.sh"
+. "$SCRIPT_DIR/lib/watch.sh"
+
+# Harness pieces a non-primary account shares with ~/.claude. Credentials and
+# .claude.json stay per-account; everything else is one fleet.
+LINKS="CLAUDE.md MISSION.md settings.json settings.local.json skills hooks agents plugins projects state history.jsonl lib scripts bin agent-memory sessions tasks context-mode comms reminders"
 
 mkdir -p "$ROOT"
 
@@ -84,141 +98,6 @@ done
 if [ ${#accounts[@]} -eq 0 ]; then
   case "${1:-}" in --add) : ;; *) die "no accounts under $ROOT; run: baton --add <name>" ;; esac
 fi
-
-count_of() { grep "^$1 " "$TALLY" 2>/dev/null | awk '{print $2}' | head -1; }
-weight_of() { cat "$ROOT/$1/.weight" 2>/dev/null || echo 1; }
-
-bump() {
-  local c
-  touch "$TALLY"
-  c=$(count_of "$1"); c=${c:-0}
-  { grep -v "^$1 " "$TALLY" 2>/dev/null; echo "$1 $((c+1))"; } > "$TALLY.tmp" && mv "$TALLY.tmp" "$TALLY"
-  echo "$1" > "$LAST"
-}
-
-dead_until() { awk '{print $1}' "$DEADDIR/$1" 2>/dev/null; }
-is_dead() { local u; u=$(dead_until "$1"); [ -n "$u" ] && [ "$u" -gt "$(now)" ]; }
-mark_dead() { mkdir -p "$DEADDIR"; echo "$2 ${3:-manual}" > "$DEADDIR/$1"; rm -f "$ALIVEDIR/$1"; }
-
-parse_duration() { # 90m / 5h / 3d / raw seconds -> seconds
-  case "$1" in
-    *d) echo $(( ${1%d} * 86400 )) ;;
-    *h) echo $(( ${1%h} * 3600 )) ;;
-    *m) echo $(( ${1%m} * 60 )) ;;
-    *[!0-9]*) die "bad duration '$1' (use 90m / 5h / 3d)" ;;
-    *) echo "$1" ;;
-  esac
-}
-
-# Measured 2026-08-21: setting CLAUDE_CONFIG_DIR at all -- even to the literal
-# default ~/.claude -- makes the CLI read a DIFFERENT credential slot than a
-# login done with the var unset. Both spellings of the primary dir probed
-# "Not logged in" while a bare `claude -p` answered. So the primary account
-# (whose dir physically IS ~/.claude) must launch with the var unset.
-set_envargs() { # $1 account -> ENVARGS array to prefix any claude invocation
-  if [ "$(cd "$ROOT/$1" 2>/dev/null && pwd -P)" = "$HOME/.claude" ]; then
-    ENVARGS=(env -u CLAUDE_CONFIG_DIR)
-  else
-    ENVARGS=(env "CLAUDE_CONFIG_DIR=$ROOT/$1")
-  fi
-}
-
-alive_fresh() {
-  local m
-  m=$(stat -f %m "$ALIVEDIR/$1" 2>/dev/null) || return 1
-  [ $(( $(now) - m )) -lt "$ALIVE_TTL" ]
-}
-
-parse_reset_epoch() { # stdin: limit message -> epoch of "resets 2:30pm (TZ)", or 0
-  python3 -c '
-import re, sys, datetime
-try:
-    from zoneinfo import ZoneInfo
-except ImportError:
-    ZoneInfo = None
-msg = sys.stdin.read()
-m = re.search(r"resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)(?:\s*\(([^)]+)\))?", msg, re.I)
-if not m:
-    print(0); sys.exit()
-h = int(m.group(1)) % 12
-if m.group(3).lower() == "pm":
-    h += 12
-mi = int(m.group(2) or 0)
-tz = None
-if m.group(4) and ZoneInfo:
-    try: tz = ZoneInfo(m.group(4))
-    except Exception: tz = None
-nowt = datetime.datetime.now(tz)
-t = nowt.replace(hour=h, minute=mi, second=0, microsecond=0)
-if t <= nowt:
-    t += datetime.timedelta(days=1)
-print(int(t.timestamp()))
-' 2>/dev/null || echo 0
-}
-
-probe() { # $1 name -> sets PROBE_CLASS + PROBE_OUT; applies dead/alive marks
-  local name="$1" out
-  mkdir -p "$PROBECWD" "$ALIVEDIR"
-  set_envargs "$name"
-  out=$(cd "$PROBECWD" && perl -e 'alarm shift; exec @ARGV' "$PROBE_TIMEOUT" \
-        "${ENVARGS[@]}" claude -p "reply with exactly: ok" 2>&1)
-  PROBE_OUT="$out"
-  if echo "$out" | grep -qiE "hit your .*limit|usage limit|limit reached"; then
-    PROBE_CLASS=LIMIT
-    local reset
-    reset=$(echo "$out" | parse_reset_epoch)
-    [ "$reset" -gt "$(now)" ] 2>/dev/null || reset=$(( $(now) + $(parse_duration $DEFAULT_DEAD) ))
-    mark_dead "$name" "$reset" limit
-  elif echo "$out" | grep -qiE "not logged in|please run /login|invalid api key|authentication"; then
-    PROBE_CLASS=AUTH
-    mark_dead "$name" "$(( $(now) + 3600 ))" auth
-  elif [ -n "$out" ] && echo "$out" | grep -qi "ok"; then
-    PROBE_CLASS=ALIVE
-    touch "$ALIVEDIR/$name"
-    rm -f "$DEADDIR/$name"
-  else
-    PROBE_CLASS=UNKNOWN
-  fi
-}
-
-ranked() { # live accounts, lowest count/weight first; $1 optionally excluded
-  local exclude="${1:-}" a c w
-  for a in "${accounts[@]}"; do
-    [ "$a" = "$exclude" ] && continue
-    is_dead "$a" && continue
-    c=$(count_of "$a"); c=${c:-0}
-    w=$(weight_of "$a")
-    awk -v c="$c" -v w="$w" -v a="$a" 'BEGIN{printf "%.6f %s\n", c/w, a}'
-  done | sort -n | awk '{print $2}'
-}
-
-launch() {
-  local acct="$1"; shift
-  bump "$acct"
-  echo "baton: launching as account '$acct'" >&2
-  set_envargs "$acct"
-  exec "${ENVARGS[@]}" claude "$@"
-}
-
-auto_launch() { # $1 = "probe"|"fast", rest = claude args
-  local mode="$1"; shift
-  local a
-  for a in $(ranked "${BATON_EXCLUDE:-}"); do
-    if [ "$mode" = fast ] || alive_fresh "$a"; then
-      launch "$a" "$@"
-    fi
-    warn "probing '$a'..."
-    probe "$a"
-    case "$PROBE_CLASS" in
-      ALIVE)   launch "$a" "$@" ;;
-      LIMIT)   warn "'$a' is at its limit (dead until $(date -r "$(dead_until "$a")" '+%a %l:%M%p' 2>/dev/null)); trying next" ;;
-      AUTH)    warn "'$a' is NOT LOGGED IN -- run: baton $a  then /login. Skipping 1h" ;;
-      UNKNOWN) warn "unrecognized probe result for '$a' (network?); launching anyway: ${PROBE_OUT:0:120}"
-               launch "$a" "$@" ;;
-    esac
-  done
-  die "no live account. baton --status to see dead marks; baton --revive <name> to override"
-}
 
 case "${1:-}" in
   --status)
@@ -275,6 +154,9 @@ case "${1:-}" in
   --fast)
     shift
     auto_launch fast "$@" ;;
+  --night)
+    shift
+    night_mode "$@" ;;
   *)
     [ ${#accounts[@]} -gt 0 ] || die "no accounts under $ROOT; run: baton --add <name>"
     if [ $# -ge 1 ] && [ -d "$ROOT/$1" ]; then

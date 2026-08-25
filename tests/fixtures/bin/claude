@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# tests/fixtures/bin/claude -- the fake `claude` executable (QA-DOC section
+# 2). Placed first on PATH for every scenario. Determines its "account
+# identity" the same way the real CLI implicitly does: CLAUDE_CONFIG_DIR (or
+# $HOME/.claude when unset). The ONLY thing it reads from that dir is
+# .fake-behavior -- never .claude.json, never a credentials file -- because
+# a fixture that peeked at real-looking credential files would defeat the
+# whole point of the dependency-isolation scenarios (13/14).
+set -u
+
+CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+ACCOUNTS_ROOT="${BATON_ACCOUNTS_ROOT:-$HOME/.claude-accounts}"
+LOGFILE="$ACCOUNTS_ROOT/.fake-claude.log"
+mkdir -p "$ACCOUNTS_ROOT" "$CONFIG_DIR"
+
+# Atomic-ish invocation counter: a mkdir-based lock (portable, no flock on
+# stock macOS) around a read-increment-write of a plain counter file.
+COUNTFILE="$CONFIG_DIR/.fake-invocations"
+LOCKDIR="$COUNTFILE.lock"
+tries=0
+while ! mkdir "$LOCKDIR" 2>/dev/null; do
+  sleep 0.02
+  tries=$((tries + 1))
+  [ "$tries" -gt 200 ] && break
+done
+n=$(cat "$COUNTFILE" 2>/dev/null || echo 0)
+n=$((n + 1))
+echo "$n" > "$COUNTFILE"
+rmdir "$LOCKDIR" 2>/dev/null
+
+{
+  printf 'inv=%s config=%s cwd=%s ts=%s argv=' "$n" "$CONFIG_DIR" "$PWD" "$(date +%s)"
+  printf '%q ' "$@"
+  printf '\n'
+} >> "$LOGFILE"
+
+echo "$$ $(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')" > "$CONFIG_DIR/.fake-pid-ppid"
+
+# Per-invocation behavior, read fresh every time (indexed bash arrays; bash
+# 3.2 has no associative arrays, so invocation number is a plain numeric
+# index into STEP_*).
+STEP_STDOUT=(); STEP_STDERR=(); STEP_EXIT=(); STEP_TRANSCRIPT=()
+STEP_BLOCK=(); STEP_BLOCK_EXIT=(); STEP_BLOCK_TICKS=()
+DEFAULT_STDOUT="ok"
+DEFAULT_EXIT=0
+BEHAVIOR="$CONFIG_DIR/.fake-behavior"
+[ -f "$BEHAVIOR" ] && . "$BEHAVIOR"
+
+# n (invocation number) is 1-based; bash's `arr=(a b)` literal is 0-based, so
+# index with n-1 -- STEP_STDOUT=("first call" "second call") then reads
+# naturally in fixture files.
+idx=$((n - 1))
+stdout_text="${STEP_STDOUT[$idx]-$DEFAULT_STDOUT}"
+stderr_text="${STEP_STDERR[$idx]-}"
+exit_code="${STEP_EXIT[$idx]-$DEFAULT_EXIT}"
+transcript_id="${STEP_TRANSCRIPT[$idx]-}"
+block="${STEP_BLOCK[$idx]-0}"
+block_exit="${STEP_BLOCK_EXIT[$idx]-143}"
+block_ticks="${STEP_BLOCK_TICKS[$idx]-0}"
+
+if [ -n "$transcript_id" ]; then
+  slug=$(printf '%s' "$PWD" | sed 's/[./]/-/g')
+  mkdir -p "$CONFIG_DIR/projects/$slug"
+  : > "$CONFIG_DIR/projects/$slug/$transcript_id.jsonl"
+fi
+
+[ -n "$stdout_text" ] && echo "$stdout_text"
+[ -n "$stderr_text" ] && echo "$stderr_text" >&2
+
+if [ "$block" = "1" ]; then
+  trap 'echo "sigterm inv=$n" >> "'"$CONFIG_DIR"'/.fake-signals.log"; exit '"$block_exit"'' TERM
+  # STEP_BLOCK_TICKS > 0 models a session that eventually finishes on its
+  # own (a "clean exit" after some idle watching) rather than only ever
+  # exiting via SIGTERM -- needed by the UNKNOWN-content scenario, which
+  # must observe the watcher doing nothing for a while and THEN see a
+  # natural exit, without any external kill.
+  ticks=0
+  while :; do
+    sleep 0.1
+    if [ "$block_ticks" -gt 0 ]; then
+      ticks=$((ticks + 1))
+      [ "$ticks" -ge "$block_ticks" ] && exit "$exit_code"
+    fi
+  done
+fi
+
+exit "$exit_code"
