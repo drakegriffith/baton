@@ -4,9 +4,9 @@
 # detect (classify_text, via probe() and mark_dead_for_class); never the
 # reverse. Exposes the public surface `watch` is allowed to call: ranked(),
 # is_dead(), mark_dead(), mark_dead_for_class(), probe(), pick_live(),
-# set_envargs(), bump(). Everything else here (tally file format, dead-file
-# format) is private and must stay that way -- watch.sh never opens these
-# files directly.
+# set_envargs(), bump(), die_no_live_account(). Everything else here (tally
+# file format, dead-file format) is private and must stay that way --
+# watch.sh never opens these files directly.
 #
 # ROOT honors BATON_ACCOUNTS_ROOT (default $HOME/.claude-accounts, unchanged)
 # per D7 -- the one override point that keeps every test off the real
@@ -161,8 +161,16 @@ launch() {
   exec "${ENVARGS[@]}" claude "$@"
 }
 
+# die_no_live_account -- the one place that spells the operator-facing
+# message for "pick_live ran out of accounts". Called from auto_launch()
+# (exec path) and night_mode()'s two pick_live call sites (initial pick +
+# post-rotation pick) so the wording can't drift between them.
+die_no_live_account() {
+  die "no live account. baton --status to see dead marks; baton --revive <name> to override"
+}
+
 auto_launch() { # $1 = "probe"|"fast", rest = claude args
   local mode="$1"; shift
   pick_live "$mode" && launch "$PICKED" "$@"
-  die "no live account. baton --status to see dead marks; baton --revive <name> to override"
+  die_no_live_account
 }

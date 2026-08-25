@@ -34,6 +34,16 @@ scenario_end() {
 # both pre-marked alive-and-undead so plain baton's own alive-cache behavior
 # is reused unmodified for the initial pick in --night mode too (D1: "the
 # same way plain baton does").
+#
+# $1, if "hardcoded", points BATON_ACCOUNTS_ROOT at $HOME/.claude-accounts
+# instead of a scratch subdir -- for the regression scenario (QA-DOC section
+# 5 row 12) that must exercise BATON_ACCOUNTS_ROOT UNSET so the pre-failover
+# baton (which hardcodes $HOME/.claude-accounts and has never heard of
+# BATON_ACCOUNTS_ROOT) and the current baton (whose default is that exact
+# same path per D7) read the identical directory. Exporting the var to that
+# literal value rather than truly leaving it unset is equivalent from both
+# scripts' point of view (old ignores it; new's default already resolves
+# there) and keeps every other fixture helper in this file working unchanged.
 fresh_root() {
   # Defensive: this repo's own dev environment runs under a real baton
   # account (CLAUDE_CONFIG_DIR pointing at a real ~/.claude-accounts/<name>).
@@ -48,7 +58,11 @@ fresh_root() {
   SCRATCH="$(cd "$(mktemp -d)" && pwd -P)"
   export HOME="$SCRATCH/home"
   mkdir -p "$HOME"
-  export BATON_ACCOUNTS_ROOT="$SCRATCH/accounts"
+  if [ "${1:-}" = hardcoded ]; then
+    export BATON_ACCOUNTS_ROOT="$HOME/.claude-accounts"
+  else
+    export BATON_ACCOUNTS_ROOT="$SCRATCH/accounts"
+  fi
   mkdir -p "$BATON_ACCOUNTS_ROOT"
   export PATH="$FIXTURES_DIR/bin:$PATH"
   export BATON_WATCH_INTERVAL="0.2"
@@ -60,31 +74,7 @@ fresh_root() {
   touch "$BATON_ACCOUNTS_ROOT/.alive/a" "$BATON_ACCOUNTS_ROOT/.alive/b"
 }
 
-# fresh_root_hardcoded_default -- like fresh_root(), but for the regression
-# scenario (QA-DOC section 5 row 12) that must exercise BATON_ACCOUNTS_ROOT
-# UNSET so the pre-failover baton (which hardcodes $HOME/.claude-accounts and
-# has never heard of BATON_ACCOUNTS_ROOT) and the current baton (whose
-# default is that exact same path per D7) read the identical directory.
-# Exporting the var to that literal value rather than truly leaving it unset
-# is equivalent from both scripts' point of view (old ignores it; new's
-# default already resolves there) and keeps every other fixture helper in
-# this file working unchanged.
-fresh_root_hardcoded_default() {
-  unset CLAUDE_CONFIG_DIR
-  SCRATCH="$(cd "$(mktemp -d)" && pwd -P)"
-  export HOME="$SCRATCH/home"
-  mkdir -p "$HOME"
-  export BATON_ACCOUNTS_ROOT="$HOME/.claude-accounts"
-  mkdir -p "$BATON_ACCOUNTS_ROOT"
-  export PATH="$FIXTURES_DIR/bin:$PATH"
-  export BATON_WATCH_INTERVAL="0.2"
-
-  mkdir -p "$HOME/.claude"
-  ln -s "$HOME/.claude" "$BATON_ACCOUNTS_ROOT/a"
-  mkdir -p "$BATON_ACCOUNTS_ROOT/b"
-  mkdir -p "$BATON_ACCOUNTS_ROOT/.alive"
-  touch "$BATON_ACCOUNTS_ROOT/.alive/a" "$BATON_ACCOUNTS_ROOT/.alive/b"
-}
+fresh_root_hardcoded_default() { fresh_root hardcoded; }
 
 add_account() { # $1 name -- a third (or later) non-primary account, alive+undead
   mkdir -p "$BATON_ACCOUNTS_ROOT/$1"
@@ -126,38 +116,6 @@ invocation_count() {
   cat "$(invocation_count_file_of "$1")" 2>/dev/null || echo 0
 }
 
-# wait_until COND_CMD... TIMEOUT_SECS -- polls a bash condition (last arg is
-# the timeout) every 0.1s. Returns 1 on timeout. Used instead of a fixed
-# sleep so scenarios stay fast on a quiet machine and don't flake on a loaded
-# one.
-wait_until() {
-  local timeout="${!#}"
-  local cond=("${@:1:$#-1}")
-  local waited=0
-  while ! "${cond[@]}" >/dev/null 2>&1; do
-    sleep 0.1
-    waited=$(awk -v w="$waited" 'BEGIN{printf "%.1f", w+0.1}')
-    if awk -v w="$waited" -v t="$timeout" 'BEGIN{exit !(w>=t)}'; then
-      "${cond[@]}" >/dev/null 2>&1 && return 0
-      return 1
-    fi
-  done
-  return 0
-}
-
-file_has_lines() { [ -s "$1" ]; }
-
-# append_transcript_line NAME TEXT -- appends one line to the single jsonl
-# transcript file that exists under that account's projects/<slug>/ dir
-# (there must be exactly one by the time this is called).
-append_transcript_line() {
-  local dir="$(config_dir_of "$1")/projects/$(cwd_slug)"
-  local f
-  f=$(ls "$dir"/*.jsonl 2>/dev/null | head -1)
-  [ -n "$f" ] || return 1
-  printf '%s\n' "$2" >> "$f"
-}
-
 transcript_file_of() { # $1 account -> path of its (single) transcript file, if any
   local dir="$(config_dir_of "$1")/projects/$(cwd_slug)"
   ls "$dir"/*.jsonl 2>/dev/null | head -1
@@ -188,7 +146,6 @@ wait_for_night_exit() {
   return 0
 }
 
-night_stdout() { cat "$SCRATCH/night.out" 2>/dev/null; }
 night_stderr() { cat "$SCRATCH/night.err" 2>/dev/null; }
 
 # wait_for_transcript NAME TIMEOUT -- blocks until account NAME's transcript

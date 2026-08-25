@@ -2,8 +2,9 @@
 # watch -- child-process control for `baton --night`. Depends on detect
 # (classify_text, for both the live-transcript and post-exit-probe paths)
 # and on accounts' public surface only (ranked/pick_live, mark_dead_for_class,
-# probe, set_envargs, bump) -- never on accounts' private state files
-# directly, and never a second copy of the LIMIT/AUTH regex family.
+# probe, set_envargs, bump, die_no_live_account) -- never on accounts'
+# private state files directly, and never a second copy of the LIMIT/AUTH
+# regex family.
 #
 # Forbidden dependency (see QA-DOC section 4 rule 4 and the dependency
 # scenario in tests/scenarios): watch's only filesystem reads are transcript
@@ -138,7 +139,7 @@ night_mode() {
   local max_handoffs="${BATON_MAX_HANDOFFS:-3}"
   local handoffs=0 resume_mode="" acct prev
 
-  pick_live probe || die "no live account. baton --status to see dead marks; baton --revive <name> to override"
+  pick_live probe || die_no_live_account
   acct="$PICKED"
 
   while true; do
@@ -155,7 +156,7 @@ night_mode() {
         if [ $((handoffs + 1)) -gt "$max_handoffs" ]; then
           die "handoff cap ($max_handoffs) reached; raise it with BATON_MAX_HANDOFFS"
         fi
-        pick_live probe || die "no live account. baton --status to see dead marks; baton --revive <name> to override"
+        pick_live probe || die_no_live_account
         prev="$acct"
         acct="$PICKED"
         handoffs=$((handoffs + 1))
