@@ -45,7 +45,8 @@ used as `CLAUDE_CONFIG_DIR`. `--add` symlinks the harness pieces (settings,
 skills, hooks, projects, ...) back to your primary `~/.claude` so every
 account runs one config and can resume each other's sessions; only
 credentials and `.claude.json` stay per-account. If your primary `~/.claude`
-should be an account too, symlink it: `ln -s ~/.claude ~/.claude-accounts/a`.
+should be an account too, symlink it (create the root first on a fresh
+machine): `mkdir -p ~/.claude-accounts && ln -s ~/.claude ~/.claude-accounts/a`.
 
 ## Use
 
