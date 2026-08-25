@@ -19,10 +19,20 @@ for f in "$HERE"/unit/*.sh; do
   bash "$f"
 done
 
+# A scenario that dies mid-file (an unset variable under `set -u`, a fixture
+# that aborts) never reaches scenario_end, so it writes NO result line -- and
+# a missing line is invisible in a PASS/FAIL tally: the suite just reports
+# one fewer test and still exits 0. Absence of a result is a failure to
+# inspect, not a pass, so it is recorded as one.
 for f in "$HERE"/scenarios/*.sh; do
   [ -e "$f" ] || continue
   echo "== scenario: $(basename "$f") =="
+  before=$(grep -cE '^(PASS|FAIL) ' "$RESULTS_FILE" 2>/dev/null || true)
   bash "$f"
+  after=$(grep -cE '^(PASS|FAIL) ' "$RESULTS_FILE" 2>/dev/null || true)
+  if [ "$after" -eq "$before" ]; then
+    echo "FAIL $(basename "$f" .sh) -- [scenario recorded no result: died before scenario_end]" >> "$RESULTS_FILE"
+  fi
 done
 
 # grep -c always prints a count (even 0) but exits nonzero when the count is

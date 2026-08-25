@@ -87,9 +87,24 @@ cleanup_root() {
 }
 
 # config_dir_of NAME -- where that account's CLAUDE_CONFIG_DIR resolves to,
-# by the exact rule baton itself uses (primary == $HOME/.claude).
+# by the exact rule baton itself uses (set_envargs): an account dir that
+# physically IS $HOME/.claude is the primary account and runs with the var
+# unset; anything else runs under $BATON_ACCOUNTS_ROOT/<name>.
+#
+# This must be derived, never assumed from the NAME. Hardcoding `a ->
+# $HOME/.claude` was a hole in the harness, not a shorthand: scenario 14
+# deliberately does NOT override $HOME (it runs against the real one) and
+# points account "a" at a scratch dir instead, so `write_behavior a` wrote
+# .fake-behavior into the operator's REAL ~/.claude -- outside every temp
+# root the suite promises to stay inside -- while the fake claude, reading
+# the scratch dir baton actually gave it, found no behavior file at all.
 config_dir_of() {
-  if [ "$1" = a ]; then echo "$HOME/.claude"; else echo "$BATON_ACCOUNTS_ROOT/$1"; fi
+  local phys; phys="$(cd "$BATON_ACCOUNTS_ROOT/$1" 2>/dev/null && pwd -P)"
+  if [ "$phys" = "$HOME/.claude" ]; then
+    echo "$HOME/.claude"
+  else
+    echo "$BATON_ACCOUNTS_ROOT/$1"
+  fi
 }
 
 # cwd_slug -- the same absolute-cwd/-/. -> - rule DOC.md gives the real CLI,

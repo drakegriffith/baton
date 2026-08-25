@@ -156,7 +156,7 @@ sets up before invoking `baton`; "Assert" = what it checks after.
 | 4 | Headless auth -> rotate | same shape, "Not logged in" text | `.dead/a` has `until-epoch auth`-shaped content (1h out); `b` launches |
 | 5 | Clean exit, no rotation | fake claude for `a` exits 0; post-exit probe answers "ok" | baton exit code 0; `.dead/a` absent; `.fake-claude.log` has exactly the launch + the probe, never a second launch |
 | 6 | Nonzero non-limit exit | same, exit code 7, ordinary text; probe answers "ok" | baton exit code 7; `.dead/a` absent |
-| 7 | All accounts limited | both `a` and `b` configured like #3 | baton exit nonzero; stderr contains the exact existing "no live account" string; `.dead/a` and `.dead/b` both present with future epochs |
+| 7 | All accounts limited | both `a` and `b` configured like #3 | baton exit nonzero; stderr contains the "no live account" guidance, naming the resolved accounts root and `BATON_ACCOUNTS_ROOT` (amended post-review: the Gherkin requires the root be named, so the message is no longer byte-identical to the pre-failover one); `.dead/a` and `.dead/b` both present with future epochs |
 | 8 | Handoff cap | 3 accounts, `BATON_MAX_HANDOFFS=1`, `a` and `b` both limit like #3 | baton exit nonzero; stderr contains `1` and `BATON_MAX_HANDOFFS`; `.fake-claude.log` has zero entries for `c` |
 | 9 | Unrecognized content -> UNKNOWN | fake claude for `a` blocks on stdin; append lines like "Here is the code..." | after `BATON_WATCH_INTERVAL * 3` seconds of polling, `.dead/a` still absent, no SIGTERM sent (fake claude's own log shows it never received one), stderr has no handoff text; THEN fixture makes fake claude exit 0 and asserts final exit code matches |
 | 10 | Shared classification (outline) | no process at all -- Section 6 below gives the exact black-box double-check using only `--probe` and a transcript file, no separate "unit test" of an internal function | see Section 6 |
@@ -180,6 +180,16 @@ watcher use the *same* classification, drive both call sites through the CLI:
    This is a genuine regression guard against "two drifting copies" of the
    limit regex (the exact failure mode DOC.md calls out) without reading a
    line of implementation.
+
+**Disposition (amended post-review):** `tests/unit/detect_test.sh` sources
+`lib/detect.sh` and calls `classify_text` directly, which this section's "no
+separate unit test of an internal function" wording did not anticipate. It
+stands as an *additive* test: `detect` is the one pure module (no state, no
+process, no `set -u`/`ROOT` coupling), so sourcing it costs nothing and buys
+rows the black-box path is too coarse to reach (multi-line transcript text,
+case-insensitivity). The black-box contract test (scenario 10) remains the
+cross-site guard, and the rule stands unchanged for every other file: no test
+sources `baton`, `accounts` or `watch`.
 
 ## 7. Suite layout the coder creates
 

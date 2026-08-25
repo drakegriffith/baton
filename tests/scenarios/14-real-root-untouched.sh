@@ -50,6 +50,15 @@ else
   scenario_check "real accounts root still does not exist" $([ ! -d "$REAL_ROOT" ]; echo $?)
 fi
 
+# The real ~/.claude is the OTHER ambient directory this scenario can leak
+# into, and it did: the fixtures used to assume account "a" always means
+# $HOME/.claude, so write_behavior dropped a .fake-* file straight into the
+# operator's live config dir. Only fixture-shaped names are checked, because
+# ~/.claude is a live directory whose real contents change constantly for
+# reasons that have nothing to do with this suite.
+fakes=$(find "$REAL_HOME/.claude" -maxdepth 1 -name '.fake-*' -newer "$marker" 2>/dev/null)
+scenario_check "real ~/.claude gained no fake-fixture files" $([ -z "$fakes" ]; echo $?)
+
 rm -f "$marker"
 rm -rf "$SCRATCH"
 scenario_end
