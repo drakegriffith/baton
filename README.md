@@ -53,6 +53,8 @@ machine): `mkdir -p ~/.claude-accounts && ln -s ~/.claude ~/.claude-accounts/a`.
 ```sh
 baton                   # auto-pick live account, launch claude
 baton --night           # launch watched; auto-switch accounts on usage limit
+baton -c                # anything baton doesn't recognize passes through to
+                        # claude, so this continues your last session
 baton <account> [...]   # force one account
 baton --next            # mark last account dead 5h, pick another
 baton --fast            # auto-pick without the liveness probe
