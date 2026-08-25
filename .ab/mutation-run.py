@@ -153,14 +153,19 @@ MUTANTS = [
      """  for a in $(ranked); do"""),
 
     # ----------------------------------------------------------- lib/watch.sh
-    ("M20", "lib/watch.sh", "find_new_jsonl", "NEW",
-     "membership test inverted: returns a PRE-EXISTING transcript, not the new one",
-     """    printf '%s\\n' "$before" | grep -qxF "$b" || { echo "$f"; return 0; }""",
-     """    printf '%s\\n' "$before" | grep -qxF "$b" && { echo "$f"; return 0; }"""),
+    # M20 re-pointed post-review: find_new_jsonl no longer exists (the D6
+    # amendment replaced new-file discovery with growth watching). Its
+    # successor is the pre-launch size lookup -- the thing that keeps a
+    # RESUMED transcript's existing content from being re-classified.
+    ("M20", "lib/watch.sh", "launch_size", "NEW",
+     "pre-launch size reported as 0: a resumed transcript is re-read from byte 0",
+     """{ s=$1; sub(/^[0-9]+ /, "", $0); if ($0 == p) { print s; found=1; exit } }""",
+     """{ s=$1; sub(/^[0-9]+ /, "", $0); if ($0 == p) { print 0; found=1; exit } }"""),
 
+    # M21's literal re-pointed post-review (same behaviour edit, new line).
     ("M21", "lib/watch.sh", "run_watched", "NEW",
      "session id blanked on a live-transcript rotation (forces -c instead of --resume)",
-     """        NIGHT_SESSION_ID=$(basename "$newfile" .jsonl)""",
+     """            NIGHT_SESSION_ID=$(basename "$f" .jsonl)""",
      """        NIGHT_SESSION_ID=\"\""""),
 
     ("M22", "lib/watch.sh", "run_watched", "NEW",
@@ -205,15 +210,25 @@ MUTANTS = [
      """        if [ -n "$NIGHT_SESSION_ID" ]; then""",
      """        if [ -z "$NIGHT_SESSION_ID" ]; then"""),
 
-    ("M30", "lib/watch.sh", "run_watched", "NEW",
-     "give-up flag test inverted: session discovery never runs",
-     """    if [ -z "$newfile" ] && [ "$gave_up_looking" -eq 0 ]; then""",
-     """    if [ -z "$newfile" ] && [ "$gave_up_looking" -ne 0 ]; then"""),
+    # M30 re-pointed post-review: the give-up flag it targeted is gone with
+    # the D6 amendment. Its successor is the order of the two reasons a night
+    # can end -- exhaustion vs. the handoff cap -- which is the F2 fix.
+    ("M30", "lib/watch.sh", "night_mode", "NEW",
+     "cap checked before exhaustion: the last account's limit is misreported as a cap hit",
+     """        candidates_exist || die_no_live_account
+        if [ $((handoffs + 1)) -gt "$max_handoffs" ]; then
+          die "handoff cap ($max_handoffs) reached; raise it with BATON_MAX_HANDOFFS"
+        fi""",
+     """        if [ $((handoffs + 1)) -gt "$max_handoffs" ]; then
+          die "handoff cap ($max_handoffs) reached; raise it with BATON_MAX_HANDOFFS"
+        fi
+        candidates_exist || die_no_live_account"""),
 
+    # M31's literal re-pointed post-review (same behaviour edit, new line).
     ("M31", "lib/watch.sh", "run_watched", "NEW",
      "growth test relaxed (-gt -> -ge): unchanged file re-read every poll",
-     """    [ "$size" -gt "$offset" ] || continue""",
-     """    [ "$size" -ge "$offset" ] || continue"""),
+     """      if [ "$size" -gt "$offset" ]; then""",
+     """      if [ "$size" -ge "$offset" ]; then"""),
 
     # --------------------------------------------------------------- baton
     ("M32", "baton", "dispatch --probe", "SHARED",
@@ -240,16 +255,18 @@ MUTANTS = [
      "--night no longer shifts its own flag off the claude args",
      """  --night)
     shift
+    . "$SCRIPT_DIR/lib/watch.sh"
     night_mode "$@" ;;""",
      """  --night)
+    . "$SCRIPT_DIR/lib/watch.sh"
     night_mode "$@" ;;"""),
 
     # ------------------------------------------ round 2: added after round 1
     # (M19 and M37-M46 target code that round 1's tree did not have, or that
     # round 1 showed nothing was watching.)
     ("M37", "lib/accounts.sh", "die_no_live_account", "NEW",
-     "reword the exhaustion message the operator is told to act on",
-     """  die "no live account. baton --status to see dead marks; baton --revive <name> to override\"""",
+     "reword the exhaustion message the operator is told to act on (drops the accounts root)",
+     """  die "no live account under $ROOT (BATON_ACCOUNTS_ROOT). baton --status to see dead marks; baton --revive <name> to override\"""",
      """  die "no live account\""""),
 
     ("M38", "lib/accounts.sh", "auto_launch", "SHARED",

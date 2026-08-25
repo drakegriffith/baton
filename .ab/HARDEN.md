@@ -397,3 +397,31 @@ Suite at the end of this seat, verbatim:
     TESTS: 53  PASS: 53  FAIL: 0
 
 (27 inherited + 10 new scenario files + 16 new unit rows, all green.)
+
+---
+
+## 5. Post-review re-run (fix seat, amended post-review)
+
+The review fixes rewrote code six recorded mutants pointed at, so their
+literals stopped matching and the harness would have refused to apply them.
+Two were re-pointed at the successor behavior, four kept the same edit at a
+new line, and all six were re-run against the fixed tree. The other 41 were
+not re-run: they target code this seat did not touch.
+
+| id | what changed about it | verdict now | failing tests |
+| -- | --------------------- | ----------- | ------------- |
+| M20 | re-pointed: `find_new_jsonl` no longer exists (D6 amendment), so the mutant now zeroes `launch_size` -- the pre-launch size that keeps a resumed transcript from being re-read from byte 0 | killed | 25-resumed-session-growth |
+| M21 | same edit, new line | killed | 01-interactive-limit-headline, 24-cwd-with-dot-in-name, 25-resumed-session-growth |
+| M30 | re-pointed: the give-up flag it inverted is gone; the mutant now restores the pre-fix order (cap checked before exhaustion) | killed | 26-exhaustion-beats-cap |
+| M31 | same edit, new line | **SURVIVED** -- the same equivalent mutant section 1 already proved and excluded: with `size == offset`, `tail -c "+$((offset+1))"` reads zero bytes either way | - |
+| M36 | same edit, new branch text (`--night` now sources watch.sh itself) | killed | 19-arg-passthrough |
+| M37 | same edit, new message (the exhaustion message now names $ROOT) | killed | 07-exhaustion |
+
+    mutants run: 6   killed: 5   survived: 1 (M31, the known equivalent)
+    git status --porcelain after run:  M .ab/mutation-run.py
+
+Suite at the end of the fix seat, verbatim:
+
+    TESTS: 55  PASS: 55  FAIL: 0
+
+(53 inherited + 25-resumed-session-growth + 26-exhaustion-beats-cap.)
