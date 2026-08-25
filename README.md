@@ -95,6 +95,31 @@ Only `never-started` is safe to re-run automatically. The fingerprint is what
 makes `orphan-running` trustworthy: a pid alone can be reused by an unrelated
 process, so the recorded start time and command line are matched too.
 
+### Handing a restarted agent the thread
+
+One sentence, and nothing else, goes to an agent picking the work back up:
+
+> Pick up &lt;task&gt;: run `baton --pickup`, act on its projection, spawn the
+> forensic reader only where it says `needs_forensics`, then reconcile the
+> terminals.
+
+The sentence stays one sentence as the work grows because it carries only the
+task name; everything else is reachable by convention from that name, and the
+board it points at is size-capped when it is WRITTEN, not when it is read.
+
+Two words in it are load-bearing:
+
+- **projection, not files.** The agent reads the JSON board, not the pile
+  behind it. Delegating that read to subagents does not save tokens -- each
+  one carries a fixed context prefix of roughly 18k before it opens anything,
+  so delegation buys a fresh context window, never a smaller bill. A board
+  a script has already reduced is cheaper read directly. Reader subagents are
+  the escalation path for `needs_forensics` entries, where a truncated log
+  needs judgment about what is salvageable.
+- **reconcile, not re-invoke.** Adopt the orphans, redo the dead, hold
+  anything that touched the outside world until its effect is verified.
+  Blind re-invocation is how a live orphan gets a duplicate.
+
 Give a bigger plan more launches: `echo 3 > ~/.claude-accounts/big/.weight`.
 
 ### Night mode knobs (env, all optional)
