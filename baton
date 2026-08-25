@@ -63,9 +63,11 @@
 #   BATON_EXCLUDE            account name auto-pick must skip (any mode)
 #   BATON_WATCH_INTERVAL     --night poll interval, seconds (default: 5)
 #   BATON_MAX_HANDOFFS       --night handoff cap per run (default: 3)
-#   BATON_SESSION_WAIT_SECS  --night max wait for a transcript file before
-#                            falling back to `-c` instead of `--resume <id>`
-#                            (default: 30)
+#   BATON_SESSION_WAIT_SECS  accepted and validated, but no longer changes
+#                            behavior: --night now watches every transcript
+#                            for GROWTH rather than waiting for a new file to
+#                            appear, so there is nothing left to wait for
+#                            (default: 30; see failover.feature D6)
 #
 # Implementation lives in lib/: detect.sh (pure text classification, shared
 # by probe() and the --night watcher so they can't drift), accounts.sh
@@ -80,7 +82,11 @@ now() { date +%s; }
 
 . "$SCRIPT_DIR/lib/detect.sh"
 . "$SCRIPT_DIR/lib/accounts.sh"
-. "$SCRIPT_DIR/lib/watch.sh"
+# watch.sh is sourced ONLY by the --night branch below (QA-DOC section 4 rule
+# 5: existing flags depend on accounts, never on watch). It defines functions
+# and nothing else, so sourcing it at dispatch time -- one statement before
+# the single call site -- is as safe as sourcing it here, and makes the rule
+# true of the running program rather than only of the prose.
 
 # Harness pieces a non-primary account shares with ~/.claude. Credentials and
 # .claude.json stay per-account; everything else is one fleet.
@@ -88,11 +94,9 @@ LINKS="CLAUDE.md MISSION.md settings.json settings.local.json skills hooks agent
 
 mkdir -p "$ROOT"
 
-accounts=()
-for d in "$ROOT"/*/; do
-  [ -d "$d" ] || continue
-  accounts+=("$(basename "$d")")
-done
+# The glob that defines "an account" lives in lib/accounts.sh with the two
+# functions that read the array (is_account, ranked), not here.
+enumerate_accounts
 
 # bash 3.2 (macOS default) errors on "${accounts[@]}" for an EMPTY array under
 # set -u, so refuse everything except --add before any expansion is reached.
@@ -160,6 +164,7 @@ case "${1:-}" in
     auto_launch fast "$@" ;;
   --night)
     shift
+    . "$SCRIPT_DIR/lib/watch.sh"
     night_mode "$@" ;;
   *)
     [ ${#accounts[@]} -gt 0 ] || die "no accounts under $ROOT; run: baton --add <name>"

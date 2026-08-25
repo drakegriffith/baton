@@ -19,7 +19,14 @@ start_night
 wait_for_night_exit 10
 scenario_check "night process exited" $?
 scenario_check "exit nonzero" $([ "$NIGHT_EXIT" -ne 0 ]; echo $?)
-scenario_check "existing no-live-account message on stderr" $(grep -q "no live account\. baton --status to see dead marks; baton --revive <name> to override" "$SCRATCH/night.err"; echo $?)
+scenario_check "existing no-live-account message on stderr" $(grep -q "no live account under .*baton --status to see dead marks; baton --revive <name> to override" "$SCRATCH/night.err"; echo $?)
+# The Gherkin requires this message name BATON_ACCOUNTS_ROOT, and it means
+# the ROOT ACTUALLY IN USE, not just the string "BATON_ACCOUNTS_ROOT":
+# read out of an unattended log, "no live account" alone cannot be told
+# apart from "baton was pointed at an empty directory and never saw your
+# accounts". Both halves are asserted so neither can be dropped.
+scenario_check "message names the resolved accounts root" $(grep -qF "$BATON_ACCOUNTS_ROOT" "$SCRATCH/night.err"; echo $?)
+scenario_check "message names the BATON_ACCOUNTS_ROOT knob" $(grep -q "BATON_ACCOUNTS_ROOT" "$SCRATCH/night.err"; echo $?)
 scenario_check "a marked dead with future epoch" $(is_dead_marked a && [ "$(dead_epoch_of a)" -gt "$(date +%s)" ]; echo $?)
 scenario_check "b marked dead with future epoch" $(is_dead_marked b && [ "$(dead_epoch_of b)" -gt "$(date +%s)" ]; echo $?)
 

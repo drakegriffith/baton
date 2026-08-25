@@ -69,7 +69,7 @@ Give a bigger plan more launches: `echo 3 > ~/.claude-accounts/big/.weight`.
 | `BATON_ACCOUNTS_ROOT` | `~/.claude-accounts` | accounts + state root |
 | `BATON_WATCH_INTERVAL` | `5` | seconds between transcript polls |
 | `BATON_MAX_HANDOFFS` | `3` | account switches per run before giving up |
-| `BATON_SESSION_WAIT_SECS` | `30` | wait for a session id before falling back to `-c` |
+| `BATON_SESSION_WAIT_SECS` | `30` | accepted and validated, but inert: the watcher now spots the running session by which transcript file grows, so it never waits for one to appear |
 
 ## How the limit is detected
 

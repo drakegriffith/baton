@@ -36,12 +36,28 @@
 #       verbatim) rather than classifying the exited child's own output --
 #       this matches DOC.md's wording ("child exits and its account
 #       probes/reports LIMIT") and keeps one probe implementation.
-#   D6. Session-id for `--resume` is discovered by watching
-#       "<config-dir-for-account>/projects/<cwd-slug>/*.jsonl" for a file
-#       that starts existing after child launch; if none appears within
-#       $BATON_SESSION_WAIT_SECS, baton relaunches with `-c` instead of
-#       `--resume <id>` on every future handoff in that run (no id is ever
-#       invented).
+#   D6. (amended post-review) Session-id for `--resume` is discovered by
+#       watching "<config-dir-for-account>/projects/<cwd-slug>/*.jsonl" for a
+#       file that GROWS after child launch -- existing file or new one. Only
+#       the bytes appended after launch are classified; the size of every
+#       transcript already present is snapshotted first. The file that grew
+#       is the session that is running, and its basename is the id the next
+#       handoff resumes. No id is ever invented.
+#         Original wording was "a file that starts existing after child
+#       launch; if none appears within $BATON_SESSION_WAIT_SECS, baton
+#       relaunches with `-c` ... on every future handoff in that run". That
+#       is wrong for the run this feature exists for: accounts share
+#       projects/ through the harness symlink, so after the first handoff
+#       `--resume <id>` re-opens a transcript that ALREADY exists, no new
+#       file ever appears, and the second limit of the night is never seen.
+#       Watching for growth subsumes the new-file case (a new file is one
+#       that grew from nothing), so the wait no longer gates anything and the
+#       "on every future handoff" clause is obsolete: each handoff decides
+#       independently, `--resume <id>` when a transcript grew and `-c` when
+#       the rotation came from the post-exit probe instead (D5), which has no
+#       session to resume. $BATON_SESSION_WAIT_SECS is still accepted and
+#       still validated (D7 knob, may already be exported), but no longer
+#       changes behavior.
 #   D7. New env knobs, all optional and all no-ops on default behavior when
 #       unset (per DOC.md: "without changing default behavior"):
 #         BATON_ACCOUNTS_ROOT   overrides the accounts root (default:
@@ -49,7 +65,9 @@
 #         BATON_WATCH_INTERVAL  seconds between watcher polls (default: 5)
 #         BATON_MAX_HANDOFFS    handoff cap per run (default: 3)
 #         BATON_SESSION_WAIT_SECS  seconds to wait for the transcript file to
-#                               appear before giving up on --resume (default: 30)
+#                               appear before giving up on --resume (default:
+#                               30; accepted and validated but inert since
+#                               the D6 amendment above)
 #
 # System surface driven by every scenario below: the `baton` executable
 # invoked as a real subprocess (argv in, stdout/stderr/exit-code out), a fake

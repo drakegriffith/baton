@@ -31,6 +31,12 @@ scenario_check "c never probed or launched" $([ "$(invocation_count c)" -eq 0 ];
 # every assertion above still passes.
 scenario_check "the one permitted handoff did happen (b ran)" $([ "$(invocation_count b)" -ge 1 ]; echo $?)
 scenario_check "b was launched, not merely probed" $(grep -q "config=$(config_dir_of b) " "$(fake_log)"; echo $?)
+# The other half of the pair with scenario 26: here an account is still
+# alive, so the cap really is the reason the run stopped and the
+# no-live-account message would be a lie. A build that answers with one
+# fixed message fails one of the two scenarios.
+scenario_check "stderr does NOT claim accounts are exhausted" \
+  $(! grep -q "no live account" "$SCRATCH/night.err"; echo $?)
 
 unset BATON_MAX_HANDOFFS
 cleanup_root

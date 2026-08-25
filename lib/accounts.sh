@@ -5,7 +5,7 @@
 # reverse. Exposes the public surface `watch` is allowed to call: ranked(),
 # is_dead(), mark_dead(), mark_dead_for_class(), probe(), pick_live(),
 # set_envargs(), bump(), die_no_live_account(), is_uint(), is_unum(),
-# is_account(). Everything else here (tally
+# is_account(), enumerate_accounts(), candidates_exist(). Everything else here (tally
 # file format, dead-file format) is private and must stay that way --
 # watch.sh never opens these files directly.
 #
@@ -44,10 +44,26 @@ is_unum() {
   case "$1" in *[0-9]*) [ "${#1}" -le 10 ] ;; *) return 1 ;; esac
 }
 
+# enumerate_accounts -- fill the `accounts` array from "$ROOT"/*/. This glob
+# IS the definition of "an account", so it lives here, next to the two
+# readers of that array (is_account, ranked), rather than in baton's startup
+# code: a caller that had to populate the array itself would be a caller that
+# could get the definition wrong (a plain `ls "$ROOT"` would enrol .dead,
+# .alive and .probe as accounts). baton calls this once at startup, before
+# any dispatch; nothing else writes `accounts`.
+enumerate_accounts() {
+  local d
+  accounts=()
+  for d in "$ROOT"/*/; do
+    [ -d "$d" ] || continue
+    accounts+=("$(basename "$d")")
+  done
+}
+
 # is_account NAME -- true only for a name the account enumeration produced.
-# That enumeration (`"$ROOT"/*/` in baton) is the DEFINITION of an account
-# and never matches a dotted name, so baton's own state dirs (.dead, .alive,
-# .probe) and `..` are not accounts. Every dispatch path that turns a name
+# That enumeration (enumerate_accounts' `"$ROOT"/*/`) is the DEFINITION of an
+# account and never matches a dotted name, so baton's own state dirs (.dead,
+# .alive, .probe) and `..` are not accounts. Every dispatch path that turns a name
 # into a state file or a CLAUDE_CONFIG_DIR goes through here, because the
 # `[ -d "$ROOT/$name" ]` test it replaces accepted all of them: `--probe ..`
 # probed with a config dir ABOVE the accounts root, `--probe .alive` probed
@@ -198,6 +214,14 @@ pick_live() {
   return 1
 }
 
+# candidates_exist -- true when ranked() would still offer pick_live at least
+# one account (dead marks and BATON_EXCLUDE applied; nothing is probed, no
+# token is spent). night_mode uses it to tell "every account is exhausted"
+# apart from "the handoff cap stopped us" WITHOUT probing the account the cap
+# is about to refuse -- failover.feature's cap scenario requires that the
+# third account is never probed and never launched.
+candidates_exist() { [ -n "$(ranked "${BATON_EXCLUDE:-}")" ]; }
+
 launch() {
   local acct="$1"; shift
   bump "$acct"
@@ -208,10 +232,17 @@ launch() {
 
 # die_no_live_account -- the one place that spells the operator-facing
 # message for "pick_live ran out of accounts". Called from auto_launch()
-# (exec path) and night_mode()'s two pick_live call sites (initial pick +
-# post-rotation pick) so the wording can't drift between them.
+# (exec path) and night_mode()'s two exhaustion checks (initial pick +
+# post-rotation) so the wording can't drift between them.
+#
+# It names $ROOT because the message is read hours later, out of an
+# unattended log, by someone who cannot see the environment the run had:
+# "no live account" with no root named is equally consistent with "the plan
+# really is exhausted" and with "BATON_ACCOUNTS_ROOT pointed at an empty
+# temp dir and baton never saw your accounts at all". failover.feature's
+# exhaustion scenario requires the message name BATON_ACCOUNTS_ROOT.
 die_no_live_account() {
-  die "no live account. baton --status to see dead marks; baton --revive <name> to override"
+  die "no live account under $ROOT (BATON_ACCOUNTS_ROOT). baton --status to see dead marks; baton --revive <name> to override"
 }
 
 auto_launch() { # $1 = "probe"|"fast", rest = claude args
