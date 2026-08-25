@@ -51,6 +51,16 @@ runs_fingerprint() {
 # time but not a pid AND a start time. Prints nothing when the fingerprint is
 # too short to carry one, which is how a truncated or planted record stays
 # unmatchable rather than matching everything.
+#
+# CAVEAT, stated because "start time discriminates a reused pid" is not
+# unconditional: `ps -o lstart` is SECOND-resolution. A pid reused inside the
+# same wall-clock second by a process with the same argv would read as the
+# original holder, so pid+start-time is strictly weaker than pid+argv for that
+# one case. Not reachable in practice -- macOS allocates pids sequentially and
+# wraps at 99998, so the reuse this guards against is a reboot, not a
+# microsecond -- and the alternative is worse by a wide margin: pid+argv reads
+# a child that merely exec'd as a corpse, which points straight at
+# re-dispatching live work (the bug 3194623 fixed).
 runs_birth() {
   local f="${1-}" restore=no
   case "$-" in *f*) : ;; *) restore=yes ;; esac
@@ -124,6 +134,17 @@ _runs_write() {
   mv -f "$tmp" "$dest"
 }
 
+# _runs_bypassed -- was the single-writer guard switched OFF when this receipt
+# was written? Stamped on every receipt because BATON_LOCK_DISABLE is an
+# exported env var: one `export` covers an entire night and every child in it,
+# and the environment is gone by the time anyone reads the receipts back and
+# asks why two of something ran. Reading an env var is not a dependency on
+# lib/lock.sh -- the edge stays lock -> runs, one way, and this file still
+# sources nothing.
+_runs_bypassed() {
+  if [ "${BATON_LOCK_DISABLE:-}" = 1 ]; then printf yes; else printf no; fi
+}
+
 # runs_record_start UNIT PID FINGERPRINT COMMAND -- written by the launcher
 # at the moment the pid exists, because that is the only moment anything
 # knows it. Every row carries prov=live|test so a self-test write can never
@@ -138,6 +159,7 @@ pgid=$(ps -p "$pid" -o pgid= 2>/dev/null | tr -d ' ')
 fingerprint=$fp
 command=$cmd
 started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+bypassed=$(_runs_bypassed)
 prov=${BATON_RUNS_PROV:-live}
 "
 }
@@ -151,6 +173,7 @@ runs_record_complete() {
 "unit=$unit
 exit=$code
 ended_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+bypassed=$(_runs_bypassed)
 prov=${BATON_RUNS_PROV:-live}
 "
 }

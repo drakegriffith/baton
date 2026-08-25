@@ -54,8 +54,26 @@ scenario_check "the loser's message says the subject is locked" \
 
 # Presence, not absence: the run really did inspect a claim subject. A gate
 # that inspected zero subjects failed, however green it looks.
+#
+# THIS ROW USED TO BE VACUOUS, and it wore the exact costume of a check
+# against vacuity. It asked `--lock-status <subject>` for `inspected > 0`, but
+# that count meant "I reached a determinate answer about the name you handed
+# me", not "I found a subject on disk" -- so it passed with zero subjects and
+# no lock root at all (`BATON_LOCK_DIR=/dev/null/nope` answered
+# `state=free inspected=1 EXIT=0`). The enumerating reporter is asked instead:
+# its count is of owner records actually on disk and it can come back zero,
+# which is what makes a nonzero answer mean anything. Scenario 38 pins both
+# halves of that contract directly.
+locks_out="$("$BATON_BIN" --locks 2>&1)"; locksrc=$?
+scenario_check "--locks found more than zero claim subjects on disk" \
+  $([ "$locksrc" -eq 0 ]; echo $?)
+scenario_check "--locks names the contested unit among them" \
+  $(printf '%s' "$locks_out" | grep -q "unit_$UNIT"; echo $?)
+scenario_check "--locks did not report a vacuous zero" \
+  $(! printf '%s' "$locks_out" | grep -q 'inspected 0 lock subject'; echo $?)
+
 status="$("$BATON_BIN" --lock-status "unit:$UNIT" 2>&1)"; strc=$?
-scenario_check "--lock-status inspected more than zero claim subjects" \
+scenario_check "--lock-status inspected the named claim subject's record" \
   $(printf '%s' "$status" | grep -qE 'inspected=[1-9][0-9]*'; echo $?)
 scenario_check "after both finished the unit is free again, exit 0" \
   $([ "$strc" -eq 0 ]; echo $?)

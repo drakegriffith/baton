@@ -52,12 +52,28 @@
 #   The owner record itself is written temp-then-rename (runs.sh's
 #   `_runs_write`), so a reader never sees a half-written owner.
 #
-# ESCAPE HATCH
+# ESCAPE HATCH, AND WHY IT IS LOUD
 #   BATON_LOCK_DISABLE=1 makes every claim succeed without inspecting. It
 #   exists because a guard that can strand an operator with no way through is
 #   a worse failure than the one it prevents; it is named as a KNOB in the
 #   refusal message, never as a runnable command line (baton#2 root cause 2:
 #   a shared stream may say what happened, never what to type).
+#
+#   It leaves evidence on four surfaces, because a bypass nobody can find
+#   afterwards is indistinguishable from a guard that silently did not work:
+#     1. a warning on stderr for EVERY bypassed claim (not once per process --
+#        the var is exported, so one `export` covers a whole night);
+#     2. `bypassed=yes` on every receipt written while it is set (runs.sh);
+#     3. `state=bypassed` from lock_probe, so the reporter never answers
+#        `free` -- the one answer an automated caller reads as safe-to-launch;
+#     4. a line in `<lock root>/bypass.log`, because the environment that set
+#        the var is long gone by the time anyone asks why two of something ran.
+#
+# COULD-NOT-INSPECT IS MARKED, NOT RECODED
+#   Exit 2 from the lock layer and exit 2 from a guarded command used to be
+#   indistinguishable. The lock layer's own now carries
+#   `lock-result=could-not-inspect` on stderr (_lock_cni). The exit code is
+#   unchanged because it is written into this issue's acceptance criteria.
 
 # lock_dir -- where owner records live. Honors BATON_LOCK_DIR, then falls back
 # under BATON_ACCOUNTS_ROOT so a test that redirects the accounts root
@@ -67,6 +83,79 @@ lock_dir() {
 }
 
 _lock_say() { echo "baton: $*" >&2; }
+
+# _lock_cni SUBJECT REASON -- the machine-readable marker that separates the
+# lock layer's OWN could-not-inspect from a guarded command that happened to
+# exit 2.
+#
+# Both used to be a bare exit 2 with nothing to tell them apart, so automation
+# wrapping `--claim` could not distinguish "the work ran and reported failure"
+# from "nothing ran because the guard could not look" -- which is the whole
+# reason a third exit code exists. The fix adds a CHANNEL rather than moving
+# the code: exit 2 for an unreadable lock root is written into this issue's
+# acceptance criteria, and redefining a criterion to suit an implementation is
+# not a fix. Automation greps stderr for `lock-result=could-not-inspect`;
+# present means the lock layer refused, absent means the exit code is the
+# guarded command's own.
+#
+# It also closes a plain silence: the sealed-root arm previously wrote zero
+# bytes anywhere, so the failure was not merely ambiguous, it was invisible.
+# Phrased as a statement of fact with a knob name at most, never as a command
+# to paste (root cause 2: a shared stream may say what happened, never what to
+# type).
+_lock_cni() {
+  _lock_say "lock-result=could-not-inspect subject='${1-}' reason=${2-unknown} -- nothing was claimed and nothing ran. This exit 2 belongs to the lock layer, not to a guarded command."
+}
+
+# _lock_bypassed -- is the escape hatch on right now?
+_lock_bypassed() { [ "${BATON_LOCK_DISABLE:-}" = 1 ]; }
+
+# _lock_note_bypass SUBJECT -- a durable trace, because BATON_LOCK_DISABLE is
+# an exported env var: once set it persists for the shell and every child for
+# an entire night, and the environment is long gone by the time anyone asks
+# why two of something ran. Best-effort by construction -- the hatch exists
+# for the case where the lock root itself is the problem, so failing to write
+# the trace must never be able to block the bypass it is recording.
+_lock_note_bypass() {
+  local root; root="$(lock_dir)"
+  mkdir -p "$root" 2>/dev/null || return 0
+  printf '%s pid=%s subject=%s prov=%s\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$$" "${1-}" \
+    "${BATON_LOCK_PROV:-${BATON_RUNS_PROV:-live}}" \
+    >> "$root/bypass.log" 2>/dev/null || return 0
+}
+
+# _lock_root_usable ROOT -- can this lock root be inspected AT ALL?
+#
+# An existing root has to be a readable, searchable directory. A root that
+# does NOT exist yet is only a determinate answer if it COULD exist: the
+# nearest existing ancestor has to be a directory this process can enter.
+#
+# Without that second half the reporter and the acquirer disagreed about the
+# same root. `BATON_LOCK_DIR=/dev/null/nope --lock-status` skipped the check
+# entirely (the root does not exist, so the `[ -e ]` guard was false), fell
+# through to `state=free inspected=1 EXIT=0`, and reported a clean board --
+# while `--claim` on that identical root failed its `mkdir -p` and correctly
+# answered could-not-inspect. The reporter is the one that gets asserted on.
+#
+# "Absent but creatable" stays determinate on purpose: a first-ever run has no
+# lock root, and refusing to launch on that would be a guard that never lets
+# anything start.
+_lock_root_usable() {
+  local p="${1-}" parent next
+  [ -n "$p" ] || return 1
+  if [ -e "$p" ]; then
+    [ -d "$p" ] && [ -r "$p" ] && [ -x "$p" ]
+    return $?
+  fi
+  parent="$p"
+  while [ ! -e "$parent" ]; do
+    next="$(dirname "$parent")"
+    [ "$next" = "$parent" ] && break
+    parent="$next"
+  done
+  [ -d "$parent" ] && [ -r "$parent" ] && [ -x "$parent" ]
+}
 
 # _lock_reset -- every output variable gets a value before any early return,
 # so a caller reading LOCK_HOLDER_PID after a could-not-inspect answer gets an
@@ -150,23 +239,43 @@ _lock_read_owner() {
 # lock_probe SUBJECT -> 0 (free or reclaimable) | 1 (held) | 2 (could not
 # inspect). Sets LOCK_STATE, LOCK_HOLDER_PID, LOCK_INSPECTED and friends.
 #
-# LOCK_INSPECTED is the positive control on the answer itself: a probe that
-# inspected zero subjects found nothing because it looked at nothing, and a
-# caller asserting "no lock is held" without checking this is asserting an
-# absence it never established.
+# LOCK_INSPECTED counts LOCK SUBJECTS WHOSE OWNER RECORD THIS PROBE ACTUALLY
+# READ. It used to mean "I reached a determinate answer about the one subject
+# you named" and it was reported under a name that reads as a count of things
+# found, so a subject that had never been locked reported `inspected=1` and a
+# caller asserting "it inspected more than zero subjects" was asserting
+# nothing at all. A never-locked subject now honestly reports 0. A caller that
+# wants evidence about the BOARD rather than about one name asks lock_report,
+# whose count can also come back zero.
+#
+# lock_probe itself is a thin wrapper around _lock_probe_raw that overlays one
+# fact the raw reading cannot see: whether the guard is switched OFF right
+# now. Under BATON_LOCK_DISABLE=1 no claim is being arbitrated, so answering
+# `free` -- the one answer an automated caller reads as "safe to launch" -- is
+# the specific lie this used to tell. The overlay is applied at the seam so
+# every caller (--lock-status, --locks, release) inherits it and none of them
+# has to remember the knob exists.
 lock_probe() {
+  local rc
+  _lock_probe_raw "$@"; rc=$?
+  if _lock_bypassed; then
+    LOCK_STATE=bypassed
+    return 0
+  fi
+  return "$rc"
+}
+
+_lock_probe_raw() {
   local subject="${1-}" key root d owner got
   _lock_reset
   key="$(_lock_key "$subject")" || return 2
   LOCK_SUBJECT_KEY="$key"
   root="$(lock_dir)"
 
-  # An existing-but-unreadable lock root is the could-not-inspect case the
-  # acceptance criteria name explicitly. A root that does not exist yet is
-  # different: nothing has ever been locked, which is a determinate answer.
-  if [ -e "$root" ] && { [ ! -d "$root" ] || [ ! -r "$root" ] || [ ! -x "$root" ]; }; then
-    return 2
-  fi
+  # An unusable lock root is the could-not-inspect case the acceptance
+  # criteria name explicitly, and it is judged by exactly the rule the
+  # acquirer uses, so the two can never disagree about one root again.
+  _lock_root_usable "$root" || return 2
 
   d="$root/$key.lock"
   owner="$d/owner"
@@ -175,8 +284,10 @@ lock_probe() {
   fi
 
   if [ ! -e "$owner" ]; then
+    # Nothing on disk for this subject. Determinate, and honestly zero: there
+    # was no record to read.
     LOCK_STATE=free
-    LOCK_INSPECTED=1
+    LOCK_INSPECTED=0
     return 0
   fi
   [ -r "$owner" ] || return 2
@@ -221,9 +332,24 @@ lock_claim() {
   local subject="${1-}" key root d gate fp attempt=0 rc
   _lock_reset
 
-  if [ "${BATON_LOCK_DISABLE:-}" = 1 ]; then
-    LOCK_STATE=disabled
+  # The escape hatch, and the three pieces of evidence it now leaves. It used
+  # to set LOCK_STATE=disabled, which was read by zero consumers, and return
+  # silently: two concurrent dispatches of one unit, 0 bytes on stderr, no
+  # field on any receipt, `--lock-status` still answering `free`, and not even
+  # a lock root on disk afterwards. An escape hatch is defensible; one that
+  # leaves no evidence it was used is not, because the operator debugging the
+  # duplicate a week later has nothing to find.
+  #
+  # The warning fires on EVERY bypassed claim rather than once per process, on
+  # purpose: BATON_LOCK_DISABLE is exported, so one `export` covers a whole
+  # night and every child in it, and a once-per-process line would under-report
+  # by exactly the factor that matters.
+  if _lock_bypassed; then
+    LOCK_STATE=bypassed
     LOCK_HOLDER_PID="$$"
+    LOCK_INSPECTED=0
+    _lock_say "SINGLE-WRITER GUARD BYPASSED for '$subject' -- BATON_LOCK_DISABLE=1 is set, so nothing was inspected and nothing is arbitrating this subject. A second writer will NOT be refused."
+    _lock_note_bypass "$subject"
     return 0
   fi
 
@@ -259,7 +385,13 @@ lock_claim() {
         LOCK_STATE=claimed
         return 0
       fi
-      _lock_say "'$subject' is locked by live pid $LOCK_HOLDER_PID (held since ${LOCK_CLAIMED_AT:-unknown}, prov=${LOCK_HOLDER_PROV:-unknown}); refusing to be the second writer. Knob to bypass: BATON_LOCK_DISABLE"
+      # The knob is still named, and deliberately: a guard that blocks an
+      # operator at 3am with no stated way through is a worse failure than the
+      # one it prevents. It is named as a KNOB and never as a pasteable
+      # command line (root cause 2), and the line now also says that using it
+      # is recorded -- an escape hatch you can find afterwards is a different
+      # object from one you cannot.
+      _lock_say "'$subject' is locked by live pid $LOCK_HOLDER_PID (held since ${LOCK_CLAIMED_AT:-unknown}, prov=${LOCK_HOLDER_PROV:-unknown}); refusing to be the second writer. Knob to bypass, recorded on every claim and receipt when set: BATON_LOCK_DISABLE"
       return 1
     fi
 
@@ -329,7 +461,14 @@ lock_hold() {
     _lock_say "lock_hold needs a command to run"
     return 2
   fi
-  lock_claim "$subject" || return $?
+  lock_claim "$subject"; rc=$?
+  if [ "$rc" -ne 0 ]; then
+    # The claim layer's own exit 2 is marked here, at the seam where it is
+    # about to become a process exit code that automation reads. Without the
+    # marker this exit 2 is byte-identical to `"$@"` having run and exited 2.
+    [ "$rc" -eq 2 ] && _lock_cni "$subject" claim-could-not-inspect
+    return "$rc"
+  fi
   "$@"
   rc=$?
   lock_release "$subject" >/dev/null 2>&1
@@ -359,10 +498,15 @@ lock_redispatch() {
     return 2
   fi
 
-  lock_claim "unit:$unit" || return $?
+  lock_claim "unit:$unit"; rc=$?
+  if [ "$rc" -ne 0 ]; then
+    [ "$rc" -eq 2 ] && _lock_cni "unit:$unit" claim-could-not-inspect
+    return "$rc"
+  fi
 
   if ! lock_kill_orphan "$unit"; then
     _lock_say "'$unit': could not CONFIRM the matched orphan is gone; not launching a replacement on top of it"
+    _lock_cni "unit:$unit" orphan-death-unconfirmed
     lock_release "unit:$unit" >/dev/null 2>&1
     return 2
   fi
@@ -371,6 +515,99 @@ lock_redispatch() {
   rc=$?
   lock_release "unit:$unit" >/dev/null 2>&1
   return "$rc"
+}
+
+# lock_subject_for_argv ARGS... -- the lock subject a claude argv implies, or
+# nothing (return 1). Only an EXPLICIT `--resume <id>` / `--resume=<id>` is
+# keyable: a cold start and `-c` have no session id at the moment of launch
+# (the id only becomes knowable once a transcript grows), so they are
+# deliberately UNguarded rather than guarded by a guessed key -- a guessed key
+# would serialize unrelated launches onto one subject, which is a worse bug
+# than the one being prevented. The 2026-08-25 incident was two `--resume
+# <id>` launches; that is the shape this can cover today.
+#
+# Ported from the unmerged fix/2-resume-lock branch (PR #5), which had this
+# right before main did. Only the subject namespace changed: main's lock root
+# takes namespaced subjects (`session:`, `unit:`, `login:`), so the branch's
+# `session-<id>` becomes `session:<id>` and reaches the same key.
+lock_subject_for_argv() {
+  local prev="" a
+  for a in "$@"; do
+    if [ "$prev" = "--resume" ]; then
+      [ -n "$a" ] || return 1
+      printf 'session:%s' "$a"; return 0
+    fi
+    case "$a" in
+      --resume=*)
+        [ -n "${a#--resume=}" ] || return 1
+        printf 'session:%s' "${a#--resume=}"; return 0 ;;
+    esac
+    prev="$a"
+  done
+  return 1
+}
+
+# lock_guard_launch ARGS... -- the guard baton's INTERACTIVE dispatch calls
+# just before handing ARGS to claude, on every path that can launch:
+# `baton <account> ...`, plain auto-pick, `--fast` and `--next`. Silent and
+# free when the argv implies no session.
+#
+# It EXITS rather than returning a code, so no call site can acquire, ignore
+# the answer and launch anyway. That is the whole reason the criterion was
+# unmet on main: the claim existed (in watch.sh) and the interactive path
+# simply never asked.
+#
+# baton `exec`s, so the pid recorded here BECOMES the claude process and the
+# lock stays live for exactly as long as the session does -- no trap to miss,
+# no release to forget, and the process dying IS the release, which is the
+# only kind that survives a host restart.
+lock_guard_launch() {
+  local subject rc
+  subject="$(lock_subject_for_argv "$@")" || return 0
+  [ -n "$subject" ] || return 0
+  lock_claim "$subject"; rc=$?
+  [ "$rc" -eq 0 ] && return 0
+  [ "$rc" -eq 2 ] && _lock_cni "$subject" claim-could-not-inspect
+  exit "$rc"
+}
+
+# lock_report -- the `--locks` check: enumerate every subject the lock root
+# actually holds a record for, and say how many that was.
+#
+# This exists because `--lock-status <subject>` can only ever answer about the
+# ONE subject it was handed, so its `inspected` count is 0 or 1 and can never
+# be evidence about the board. A caller that wants "the guard is installed and
+# has subjects on disk" has to ask a question that enumerates, and the count
+# has to be able to come back 0. Ported from PR #5's `lock_report`.
+#
+# Exit codes, and why "found nothing" and "could not look" are not one code:
+#   0  inspected at least one subject
+#   1  inspected the root successfully and found ZERO subjects
+#   2  COULD NOT INSPECT the root at all
+# Read-only on purpose: a reporter that reclaims what it reports cannot be
+# trusted about what was there before it looked.
+lock_report() {
+  local root d subject n=0
+  root="$(lock_dir)"
+  if ! _lock_root_usable "$root"; then
+    _lock_cni "(every subject)" lock-root-unusable
+    return 2
+  fi
+  printf '%-52s %-18s %-10s %s\n' SUBJECT STATE HOLDER-PID PROV
+  if [ -d "$root" ]; then
+    for d in "$root"/*.lock; do
+      [ -d "$d" ] || continue
+      [ -e "$d/owner" ] || continue
+      subject="$(basename "$d")"; subject="${subject%.lock}"
+      lock_probe "$subject" >/dev/null 2>&1
+      printf '%-52s %-18s %-10s %s\n' \
+        "$subject" "$LOCK_STATE" "${LOCK_HOLDER_PID:--}" "${LOCK_HOLDER_PROV:--}"
+      n=$((n + 1))
+    done
+  fi
+  printf 'baton: inspected %s lock subject(s) under %s\n' "$n" "$root"
+  [ "$n" -gt 0 ] || return 1
+  return 0
 }
 
 # lock_kill_orphan UNIT -> 0 CONFIRMED gone | 2 could not confirm.

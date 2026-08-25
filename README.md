@@ -62,6 +62,7 @@ baton --status          # accounts, weights, launches, dead-until
 baton --dead [n] [dur]  # mark dead (90m / 5h / 3d)
 baton --revive <name>   # clear a dead mark
 baton --pickup          # what the last session left behind, as JSON
+baton --locks           # every lock subject on disk, with state and holder
 ```
 
 ## Picking up after a crash (`baton --pickup`)
@@ -131,7 +132,7 @@ Give a bigger plan more launches: `echo 3 > ~/.claude-accounts/big/.weight`.
 | `BATON_MAX_HANDOFFS` | `3` | account switches per run before giving up |
 | `BATON_SESSION_WAIT_SECS` | `30` | accepted and validated, but inert: the watcher now spots the running session by which transcript file grows, so it never waits for one to appear |
 
-## Only one writer per subject (`--lock-status`, `--claim`, `--redispatch`)
+## Only one writer per subject (`--locks`, `--lock-status`, `--claim`, `--redispatch`)
 
 `--pickup` tells a restarted agent what was in flight. It deliberately does not
 tell it whether someone else is already acting on that. The board is a
@@ -147,12 +148,20 @@ can reclaim without a human, and a refusal that names the holder -- so they are
 one mechanism with a subject argument. The next lockable thing costs a string.
 
 ```sh
+baton --locks                             # every subject on disk, with state and holder
 baton --lock-status session:<id>          # free | held | stale-dead | stale-foreign | could-not-inspect
 baton --claim unit:<name> -- <command>    # run the command, or refuse naming the pid that has it
 baton --redispatch <unit> -- <command>    # kill the matched orphan, CONFIRM it, then replace it
 ```
 
-Three things are worth knowing before you rely on it:
+You do not have to ask for it on the interactive path. `baton <account>
+--resume <id>`, `baton --fast --resume <id>`, `baton --next --resume <id>` and
+plain `baton --resume <id>` all claim `session:<id>` before they hand argv to
+`claude`. Only an explicit `--resume` is guarded: a cold start has no session
+id yet, and guarding it under a guessed key would serialize unrelated launches
+onto one subject.
+
+Five things are worth knowing before you rely on it:
 
 - **A held lock names the pid that holds it.** Refusal is not "try later"; it
   is "pid 4242 is writing this right now". Ask `--lock-status` for the rest.
@@ -168,10 +177,35 @@ Three things are worth knowing before you rely on it:
   every live holder as dead, which is precisely how the duplicate this exists
   to prevent gets launched.
 
+- **"I found nothing" and "I could not look" are different answers, and the
+  reporter and the acquirer give the same one.** `--locks` exits 0 when it
+  found subjects, 1 when it inspected the root and found exactly zero, and 2
+  when it could not inspect the root at all. `--lock-status <subject>` counts
+  only the subject you named, so its `inspected` is 0 or 1 and can never be
+  evidence about the board -- ask `--locks` for that.
+- **The lock layer's own exit 2 is marked.** `--claim` returns the guarded
+  command's exit code, which can also be 2, so a could-not-inspect from the
+  lock layer itself puts `lock-result=could-not-inspect` on stderr. Present
+  means nothing ran; absent means the code is the command's own.
+
 `BATON_LOCK_DISABLE=1` turns every claim into a no-op. It exists because a
 guard that can strand you with no way through is worse than the failure it
 prevents; it is a knob, and the refusal message names it rather than handing
 you a command line to paste.
+
+It is not silent, because a bypass nobody can find afterwards is
+indistinguishable from a guard that quietly did not work. Every bypassed claim
+warns on stderr (every claim, not once per run -- the var is exported, so one
+`export` covers a whole night), every receipt written under it carries
+`bypassed=yes`, `--lock-status` answers `state=bypassed` rather than `free`,
+and a line lands in `<lock root>/bypass.log`.
+
+One cost of the login subject, stated because it will be noticed: it is
+global, not per-account. The issue this came from says serialize login flows
+"one at a time", and baton cannot see the `/login` you type inside the session
+it launched, so it treats every `baton <account>` as one. Two forced launches
+on different accounts therefore cannot run at once. The auto-pick paths
+(`baton`, `baton --fast`) are unaffected.
 
 The evidence layer never depends on the claim layer: `--pickup` works with no
 lock root present at all, and never creates one.

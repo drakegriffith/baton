@@ -30,8 +30,12 @@ STEP_EXIT=(0)
 STEP_STDOUT=("all good")
 EOF
 
+# `tty` runs inside the same pty, before baton, so the capture file carries
+# proof that a controlling terminal was actually allocated. The row this
+# replaces was `[ -e pty1.log ]`, which `script` satisfies whether or not it
+# ever got a terminal -- a positive control that could not fail is not one.
 script -q "$SCRATCH/pty1.log" /bin/sh -c \
-  "'$BATON_BIN' --night >'$SCRATCH/night.out' 2>'$SCRATCH/night.err'" \
+  "tty; '$BATON_BIN' --night >'$SCRATCH/night.out' 2>'$SCRATCH/night.err'" \
   </dev/null >/dev/null 2>&1
 
 # POSITIVE CONTROL, first. "The terminal received nothing" is worthless
@@ -41,14 +45,69 @@ scenario_check "positive control: baton ran and wrote to the redirected stderr" 
   $([ -s "$SCRATCH/night.err" ]; echo $?)
 scenario_check "positive control: that output is baton's own announcement" \
   $(grep -q "night mode" "$SCRATCH/night.err"; echo $?)
-scenario_check "positive control: the child really had a controlling terminal" \
-  $([ -e "$SCRATCH/pty1.log" ]; echo $?)
+scenario_check "positive control: a real controlling terminal was allocated" \
+  $(pty_text "$SCRATCH/pty1.log" | grep -qE '/dev/(tty|pts)'; echo $?)
 
 scenario_check "the controlling terminal received no baton output at all" \
   $(! pty_text "$SCRATCH/pty1.log" | grep -q 'baton'; echo $?)
 scenario_check "the controlling terminal received no runnable command" \
   $(! pty_text "$SCRATCH/pty1.log" | grep -qE '(^|[^-])baton +[a-z-]|/login'; echo $?)
 
+cleanup_root
+
+# --- the AUTH cascade ------------------------------------------------------
+# The mechanism this issue's root cause 2 actually names: `pick_live`'s AUTH
+# branch warns ONCE PER RANKED ACCOUNT, so three not-logged-in accounts turn
+# one actionable line into three, on a stream the operator is holding all
+# night. Scenario 34 never exercised it, which is why it read green on a main
+# that still emits a runnable `baton <name>` line per failing account.
+#
+# WHAT IS ASSERTED HERE, AND WHAT IS DELIBERATELY NOT. The tty rows below are
+# criterion 2 as the issue words it, and they are exercised against the real
+# cascade for the first time. The stronger row -- "night.err carries no
+# runnable command line" -- is NOT added, and this is a disclosure, not an
+# oversight: it fails on main today, its fix is PR #4 (`lib/accounts.sh:209`
+# plus a durable handoff log), and that file is explicitly out of scope for
+# this commit. Adding the row here would land a permanently red assertion for
+# a defect this commit is forbidden to fix. The multiplication is instead
+# asserted as a COUNT below, so the size of the thing PR #4 has to remove is
+# recorded in the suite rather than in prose.
+fresh_root
+export BATON_LOCK_PROV=test
+add_account c
+# The .alive marks fresh_root plants are a 15-minute ALIVE cache: with them in
+# place pick_live never probes, so the AUTH branch is never reached and the
+# cascade this section exists to exercise never fires.
+rm -f "$BATON_ACCOUNTS_ROOT/.alive"/*
+
+for acct in a b c; do
+  write_behavior "$acct" <<'EOF'
+STEP_EXIT=(1 1)
+STEP_STDOUT=("Invalid API key . Please run /login" "Invalid API key . Please run /login")
+EOF
+done
+
+script -q "$SCRATCH/pty3.log" /bin/sh -c \
+  "tty; '$BATON_BIN' --night >'$SCRATCH/auth.out' 2>'$SCRATCH/auth.err'" \
+  </dev/null >/dev/null 2>&1
+
+scenario_check "positive control: a real controlling terminal was allocated" \
+  $(pty_text "$SCRATCH/pty3.log" | grep -qE '/dev/(tty|pts)'; echo $?)
+scenario_check "positive control: the AUTH cascade really fired" \
+  $(grep -qi 'NOT LOGGED IN' "$SCRATCH/auth.err"; echo $?)
+# The multiplication itself, as a count: more than one actionable line for one
+# operator action. This is the defect PR #4 removes; recording the number is
+# how a future green stays honest about which fix produced it.
+scenario_check "positive control: the cascade multiplied across accounts (>1 line)" \
+  $([ "$(grep -ci 'NOT LOGGED IN' "$SCRATCH/auth.err")" -gt 1 ]; echo $?)
+scenario_check "the AUTH cascade reached no controlling terminal" \
+  $(! pty_text "$SCRATCH/pty3.log" | grep -q 'baton'; echo $?)
+scenario_check "the AUTH cascade put no runnable command on the terminal" \
+  $(! pty_text "$SCRATCH/pty3.log" | grep -qE '(^|[^-])baton +[a-z-]|/login'; echo $?)
+
+kill_fake_claude a
+kill_fake_claude b
+kill_fake_claude c
 cleanup_root
 
 # --- the lock refusal ------------------------------------------------------
@@ -63,15 +122,18 @@ EOF
 "$BATON_BIN" a >/dev/null 2>&1 &
 HOLDER=$!
 waited=0
-while [ ! -e "$BATON_ACCOUNTS_ROOT/.locks/login_a.lock/owner" ]; do
+while [ ! -e "$BATON_ACCOUNTS_ROOT/.locks/login.lock/owner" ]; do
   sleep 0.1; waited=$((waited + 1)); [ "$waited" -gt 100 ] && break
 done
 scenario_check "a login lock is held before the refusal is provoked" \
-  $([ -e "$BATON_ACCOUNTS_ROOT/.locks/login_a.lock/owner" ]; echo $?)
+  $([ -e "$BATON_ACCOUNTS_ROOT/.locks/login.lock/owner" ]; echo $?)
 
 script -q "$SCRATCH/pty2.log" /bin/sh -c \
-  "'$BATON_BIN' a >'$SCRATCH/refused.out' 2>'$SCRATCH/refused.err'" \
+  "tty; '$BATON_BIN' a >'$SCRATCH/refused.out' 2>'$SCRATCH/refused.err'" \
   </dev/null >/dev/null 2>&1
+
+scenario_check "positive control: a real controlling terminal was allocated" \
+  $(pty_text "$SCRATCH/pty2.log" | grep -qE '/dev/(tty|pts)'; echo $?)
 
 scenario_check "positive control: the refusal really was emitted (to the redirect)" \
   $([ -s "$SCRATCH/refused.err" ]; echo $?)

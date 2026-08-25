@@ -47,6 +47,11 @@
 #   baton --pick                  print auto-pick choice (dead-filter + tally
 #                               only; does NOT probe)
 #   baton --reset                 zero tallies
+#   baton --locks                 every lock subject on disk, with its state
+#                               and holder. Exit 0 found >0, 1 found exactly
+#                               zero (a determinate empty board), 2 could not
+#                               inspect the lock root. The last two are never
+#                               collapsed.
 #   baton --lock-status <subject>   what the lock root says about one subject
 #                               (free / held / stale-dead / stale-foreign /
 #                               could-not-inspect) and how many subjects it
@@ -77,6 +82,16 @@
 #   BATON_EXCLUDE            account name auto-pick must skip (any mode)
 #   BATON_WATCH_INTERVAL     --night poll interval, seconds (default: 5)
 #   BATON_MAX_HANDOFFS       --night handoff cap per run (default: 3)
+#   BATON_LOCK_DIR           lock root (default: <accounts root>/.locks)
+#   BATON_LOCK_DISABLE=1     turn the single-writer guard OFF. It exists
+#                            because a guard that strands an operator with no
+#                            way through is a worse failure than the one it
+#                            prevents. It is NOT silent: every bypassed claim
+#                            warns, every receipt written under it carries
+#                            `bypassed=yes`, `--lock-status` answers
+#                            `state=bypassed` rather than `free`, and a line
+#                            lands in <lock root>/bypass.log. The var is
+#                            exported, so one `export` covers a whole night.
 #   BATON_SESSION_WAIT_SECS  accepted and validated, but no longer changes
 #                            behavior: --night now watches every transcript
 #                            for GROWTH rather than waiting for a new file to
@@ -107,6 +122,23 @@ now() { date +%s; }
 
 . "$SCRIPT_DIR/lib/detect.sh"
 . "$SCRIPT_DIR/lib/accounts.sh"
+# need_lock -- pull in the claim layer at dispatch time, for the branches that
+# can launch a session. runs.sh first: lock -> runs is the only edge between
+# them, and lock.sh reuses runs.sh's liveness rule rather than keeping a second
+# copy of it. Sourcing is idempotent (both files define functions and nothing
+# else), so a branch that calls this twice costs nothing.
+#
+# This is the QA-DOC section 4 rule 5b amendment widened from the forced-
+# account path to every launching path (`--next`, `--fast`, auto-pick), for the
+# reason 5b already gives: those paths accept `--resume <id>` pass-through, and
+# an unguarded one is exactly the split-brain the lock exists to stop. The
+# forbidden edge rule 5 was written to prevent -- existing flags -> watch -- is
+# unchanged and still tested.
+need_lock() {
+  . "$SCRIPT_DIR/lib/runs.sh"
+  . "$SCRIPT_DIR/lib/lock.sh"
+}
+
 # watch.sh is sourced ONLY by the --night branch below (QA-DOC section 4 rule
 # 5: existing flags depend on accounts, never on watch). It defines functions
 # and nothing else, so sourcing it at dispatch time -- one statement before
@@ -183,10 +215,24 @@ case "${1:-}" in
       mark_dead "$last" "$(( $(now) + $(parse_duration $DEFAULT_DEAD) ))" next
       warn "marked '$last' dead for $DEFAULT_DEAD"
     fi
+    need_lock
+    lock_guard_launch "$@"
     auto_launch probe "$@" ;;
   --fast)
     shift
+    need_lock
+    lock_guard_launch "$@"
     auto_launch fast "$@" ;;
+  --locks)
+    # The enumerating reporter. `--lock-status <subject>` can only ever answer
+    # about the one subject it was handed, so its count is 0 or 1 and can
+    # never be evidence about the board; this one counts what is on disk and
+    # can honestly come back zero. Exit 0 (found >0), 1 (found 0), 2 (could
+    # not inspect) -- and the last two are never collapsed, because "I found
+    # no locks" and "I could not look" are the two answers this whole module
+    # exists to keep apart.
+    need_lock
+    lock_report; exit $? ;;
   --night)
     shift
     # runs.sh before lock.sh before watch.sh: the watcher records a receipt
@@ -255,23 +301,51 @@ case "${1:-}" in
     if [ $# -ge 1 ] && is_account "$1"; then
       acct="$1"; shift
       is_dead "$acct" && warn "'$acct' is marked dead until $(date -r "$(dead_until "$acct")" 2>/dev/null) -- launching anyway (forced)"
-      # baton#2 root cause 3: serialize login flows, one at a time, per
-      # account. `baton <account>` IS baton's login flow -- it is the exact
-      # command the not-logged-in handoff tells the operator to run, and two
-      # of them running at once for one account is two OAuth refreshes
-      # rotating each other's token, which is the shape of the 2026-08-25
-      # auth cascade. Silent on success, so this path's stdout/stderr stay
-      # byte-identical to the pre-failover script (scenario 12).
+      need_lock
+      # ORDER IS LOAD-BEARING: the session claim comes FIRST.
+      #
+      # This path takes two claims, and a refusal has to say which one blocked
+      # it. If the global login claim went first, every refusal on a contested
+      # session would be attributed to the login flow, and criterion 1 would be
+      # unprovable on the path the incident actually used -- a refusal that
+      # could have come from either lock proves neither.
+      lock_guard_launch "$@"
+      # baton#2 root cause 3: serialize login flows, ONE AT A TIME, machine-
+      # wide. `baton <account>` IS baton's login flow -- it is verbatim the
+      # command the not-logged-in handoff and `--add` tell the operator to run
+      # -- and baton cannot see the `/login` typed inside the session it
+      # launches, so it has to treat every forced launch as one.
+      #
+      # The subject is GLOBAL, not per-account. The issue says "one at a
+      # time"; a per-account subject let two different accounts log in
+      # concurrently, and no evidence was found that that is safe. The two
+      # candidate shared resources (one localhost OAuth callback; the CLI's
+      # own .oauth_refresh.lock, which is scoped to ONE credentials store and
+      # therefore cannot see a second CLAUDE_CONFIG_DIR logging into the same
+      # Anthropic account) are both unverified on this machine, and the
+      # fail-safe direction for a single-writer guard is to serialize.
+      #
+      # The cost, disclosed rather than discovered later: two forced launches
+      # on DIFFERENT accounts can no longer run at once, because this path is
+      # both the login entry point and the ordinary force-an-account path, and
+      # the claim is held for the whole life of the session. Splitting an
+      # explicit `--login <account>` out of `baton <account>` (the shape PR #5
+      # uses) is the follow-up that buys the concurrency back without giving
+      # up the serialization; it is a new entry point and a doc change, so it
+      # is not smuggled in here.
+      #
+      # Silent on success, so this path's stdout/stderr stay byte-identical to
+      # the pre-failover script (scenario 12).
       #
       # The lock survives the `exec` below on purpose: exec keeps the pid and
       # the process start time, and pid+start-time is the identity lock.sh
       # matches on, so the claim stays valid for exactly as long as the
       # launched session lives and goes stale the moment it dies.
-      . "$SCRIPT_DIR/lib/runs.sh"
-      . "$SCRIPT_DIR/lib/lock.sh"
-      lock_claim "login:$acct" || exit $?
+      lock_claim login || exit $?
       launch "$acct" "$@"
     else
+      need_lock
+      lock_guard_launch "$@"
       auto_launch probe "$@"
     fi ;;
 esac

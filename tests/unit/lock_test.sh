@@ -221,3 +221,74 @@ runs_record_start "unprobeable-unit" "$HELPER_PID" "$HELPER_FP" "sleep 300"
 ( PATH="$STUBBIN:$PATH"; lock_kill_orphan "unprobeable-unit" >/dev/null 2>&1; echo "$? $LOCK_KILLED" ) > "$SCRATCH_RUNS/unconfirmed"
 eq "kill_orphan-cannot-confirm-exits-2" "$(awk '{print $1}' "$SCRATCH_RUNS/unconfirmed")" "2"
 eq "kill_orphan-cannot-confirm-killed-nothing" "$(awk '{print $2}' "$SCRATCH_RUNS/unconfirmed")" "no"
+
+# ---------------------------------------------------------------------------
+# The reporter and the acquirer read one lock root by ONE rule.
+#
+# They used to disagree: a root that cannot exist made lock_probe skip its
+# check entirely (the `[ -e ]` guard was false) and fall through to a
+# determinate `free`, while lock_claim's `mkdir -p` correctly refused it. The
+# reporter is the one that gets asserted on, so the disagreement made every
+# "nothing is locked" row vacuous.
+# ---------------------------------------------------------------------------
+( export BATON_LOCK_DIR=/dev/null/nope; lock_probe "session:x" >/dev/null 2>&1; echo "$? $LOCK_STATE $LOCK_INSPECTED" ) > "$SCRATCH_RUNS/impossible"
+eq "impossible-lock-root-probe-exits-2" "$(awk '{print $1}' "$SCRATCH_RUNS/impossible")" "2"
+eq "impossible-lock-root-is-could-not-inspect" "$(awk '{print $2}' "$SCRATCH_RUNS/impossible")" "could-not-inspect"
+( export BATON_LOCK_DIR=/dev/null/nope; lock_claim "session:x" >/dev/null 2>&1; echo "$?" ) > "$SCRATCH_RUNS/impossible-claim"
+eq "impossible-lock-root-claim-exits-2" "$(cat "$SCRATCH_RUNS/impossible-claim")" "2"
+
+# ...and "not there yet" stays a determinate answer, or a first-ever run could
+# never launch anything.
+( export BATON_LOCK_DIR="$SCRATCH_RUNS/never-made"; lock_probe "session:x" >/dev/null 2>&1; echo "$? $LOCK_STATE" ) > "$SCRATCH_RUNS/absent"
+eq "absent-but-creatable-root-is-determinate" "$(awk '{print $1}' "$SCRATCH_RUNS/absent")" "0"
+eq "absent-but-creatable-root-reads-free" "$(awk '{print $2}' "$SCRATCH_RUNS/absent")" "free"
+
+# LOCK_INSPECTED counts owner records actually read. A subject that has never
+# been locked has no record, so the honest count is zero -- it used to report
+# 1, which is what made "it inspected more than zero subjects" provable about
+# a subject that had never existed.
+lock_probe "session:never-locked-at-all" >/dev/null 2>&1
+eq "never-locked-subject-inspected-zero" "$LOCK_INSPECTED" "0"
+eq "never-locked-subject-still-reads-free" "$LOCK_STATE" "free"
+
+# ---------------------------------------------------------------------------
+# The escape hatch is loud. BATON_LOCK_DISABLE=1 used to set a state nobody
+# read and return in silence.
+# ---------------------------------------------------------------------------
+msg="$( BATON_LOCK_DISABLE=1 lock_claim "unit:unguarded" 2>&1 )"
+ok "bypassed-claim-warns-on-stderr" $([ -n "$msg" ]; echo $?) "the bypass said nothing"
+ok "bypassed-claim-names-the-knob" $(printf '%s' "$msg" | grep -q BATON_LOCK_DISABLE; echo $?)
+( export BATON_LOCK_DISABLE=1; lock_probe "unit:unguarded" >/dev/null 2>&1; echo "$LOCK_STATE" ) > "$SCRATCH_RUNS/bypassed"
+eq "bypassed-probe-reports-bypassed-not-free" "$(cat "$SCRATCH_RUNS/bypassed")" "bypassed"
+
+# ---------------------------------------------------------------------------
+# lock_subject_for_argv: only an EXPLICIT --resume <id> is keyable. A guessed
+# key would serialize unrelated launches onto one subject, which is worse than
+# leaving a cold start unguarded.
+# ---------------------------------------------------------------------------
+eq "argv-subject-from-separate-resume-arg" "$(lock_subject_for_argv --resume abc123)" "session:abc123"
+eq "argv-subject-from-equals-form" "$(lock_subject_for_argv --resume=abc123)" "session:abc123"
+eq "argv-subject-found-after-other-args" "$(lock_subject_for_argv --model x --resume abc123 -c)" "session:abc123"
+lock_subject_for_argv -c >/dev/null 2>&1
+ok "argv-with-no-resume-implies-no-subject" $([ "$?" -ne 0 ]; echo $?)
+lock_subject_for_argv --resume >/dev/null 2>&1
+ok "dangling-resume-implies-no-subject" $([ "$?" -ne 0 ]; echo $?)
+lock_subject_for_argv --resume "" >/dev/null 2>&1
+ok "empty-resume-id-implies-no-subject" $([ "$?" -ne 0 ]; echo $?)
+
+# ---------------------------------------------------------------------------
+# lock_report: the enumerating reporter, whose count can come back ZERO. That
+# is the whole point -- `--lock-status <subject>` can only ever answer 0 or 1
+# about the one name it was handed, so it can never be evidence about a board.
+# ---------------------------------------------------------------------------
+EMPTY_ROOT="$SCRATCH_RUNS/empty-lock-root"
+mkdir -p "$EMPTY_ROOT"
+( export BATON_LOCK_DIR="$EMPTY_ROOT"; lock_report >/dev/null 2>&1; echo "$?" ) > "$SCRATCH_RUNS/report-empty"
+eq "report-on-an-empty-root-exits-1-not-0" "$(cat "$SCRATCH_RUNS/report-empty")" "1"
+( export BATON_LOCK_DIR=/dev/null/nope; lock_report >/dev/null 2>&1; echo "$?" ) > "$SCRATCH_RUNS/report-impossible"
+eq "report-on-an-unusable-root-exits-2" "$(cat "$SCRATCH_RUNS/report-impossible")" "2"
+lock_report >/dev/null 2>&1
+ok "report-on-a-populated-root-exits-0" $?
+eq "report-counts-every-subject-on-disk" \
+  "$(lock_report 2>/dev/null | sed -n 's/^baton: inspected \([0-9]*\) lock subject.*/\1/p')" \
+  "$(ls -d "$SCRATCH_LOCKS"/*.lock 2>/dev/null | wc -l | tr -d ' ')"

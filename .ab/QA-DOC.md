@@ -154,6 +154,37 @@ Rules:
    still holds for `--status`, `--pick`, `--dead`, `--revive`, `--next`,
    `--fast` and the forced account.
 
+5c. **Amendment (baton#2, the interactive resume).** 5b's exception is widened
+   from the forced-account path to **every path that can launch a session**:
+   `--next`, `--fast` and plain auto-pick source `runs` and `lock` too, and
+   each calls `lock_guard_launch` before handing argv to `claude`.
+
+   Why the narrow version was not enough: acceptance criterion 1 was UNMET
+   with 5b in place. `session:<id>` was claimed in exactly one site,
+   `lib/watch.sh`'s `run_watched`, which is the `--night` watcher. The
+   interactive paths accept `--resume <id>` as pass-through (README "Use"
+   section), and because every account symlinks `projects/` back into
+   `~/.claude`, one session id names one transcript any account can reopen --
+   so two DIFFERENT accounts resumed one session, both exited 0, and
+   `--lock-status session:<id>` reported `free`. That is the path the
+   2026-08-25 incident used.
+
+   Scope of the claim is unchanged: only an explicit `--resume <id>` is
+   keyable. A cold start has no session id at the moment of launch, and a
+   guessed key would serialize unrelated launches onto one subject, which is a
+   worse bug than leaving the cold start unguarded. Scenario 12 still holds,
+   because a launch with no `--resume` claims nothing and prints nothing.
+
+5d. **The login subject is GLOBAL, not per-account.** Root cause 3 says
+   serialize login flows "one at a time". A per-account `login:<acct>` subject
+   let two different accounts log in concurrently, which is not what that
+   says, and no evidence was found that it is safe. Cost, recorded because it
+   is real: `baton <account>` is both the login entry point and the ordinary
+   force-an-account path, and the claim survives the `exec`, so two forced
+   launches on different accounts can no longer run at once. Splitting an
+   explicit `--login <account>` out of `baton <account>` is the follow-up that
+   buys that concurrency back without giving up the serialization.
+
 6. **Tests never depend on the real `$HOME/.claude-accounts`.** Every test
    sets `BATON_ACCOUNTS_ROOT` to a fresh temp dir. This is a forbidden
    dependency: test harness -> ambient home directory. Section 6 gives a test
