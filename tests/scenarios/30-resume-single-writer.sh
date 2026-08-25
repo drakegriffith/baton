@@ -34,7 +34,7 @@
 # never touch a real ~/.claude-accounts.
 set -u
 . "$FIXTURES_DIR/lib.sh"
-scenario_begin "29-resume-single-writer"
+scenario_begin "30-resume-single-writer"
 fresh_root
 
 LOCKROOT="$BATON_ACCOUNTS_ROOT/.locks"
@@ -199,6 +199,80 @@ scenario_check "the refused login never invoked claude under b" \
 
 kill -KILL "$LOGIN_HOLDER" 2>/dev/null
 wait "$LOGIN_HOLDER" 2>/dev/null
+
+cleanup_root
+
+# --- N-way race: the lock is only as atomic as its least atomic step -------
+#
+# Everything above establishes a holder FIRST and then challenges it, which is
+# precisely how the original defect survived: `mkdir` is atomic, so a
+# challenger that arrives BEFORE the winner starts writing its owner record
+# always loses cleanly. The defect lived in a racer arriving DURING that
+# write. The first version of this file could not see it, and neither could a
+# gated race that releases every racer at the same instant -- measured, they
+# all pile up on mkdir before the window opens.
+#
+# So this block races REAL baton processes and relies on their natural startup
+# spread to land some of them inside the window. Winners are counted by
+# `claude` invocations, and every invocation blocks, so N winners in a round
+# means N writers ALIVE ON ONE SESSION AT ONCE, not N in sequence.
+#
+# Measured against the pre-fix implementation on this machine:
+#   40 racers x 10 rounds -> 59 winners for 10 sessions, 4 bad rounds,
+#   worst round 23 simultaneous writers on a single session.
+# Against the fixed implementation the window does not exist, so the expected
+# result is exact, not merely better.
+fresh_root
+LOCKROOT="$BATON_ACCOUNTS_ROOT/.locks"
+RACERS=40
+ROUNDS=6
+
+# Every invocation blocks until killed, so a winner is still holding when the
+# round is scored. 400 entries is far more than any round can consume.
+{
+  echo 'DEFAULT_EXIT=0'
+  printf 'STEP_BLOCK=('
+  i=0; while [ "$i" -lt 400 ]; do printf '1 '; i=$((i + 1)); done
+  printf ')\n'
+} > "$(config_dir_of a)/.fake-behavior"
+
+race_total=0
+race_bad=0
+race_worst=1
+for round in $(seq 1 "$ROUNDS"); do
+  before=$(invocation_count a)
+  racer_pids=""
+  i=1
+  while [ "$i" -le "$RACERS" ]; do
+    "$BATON_BIN" a --resume "sess-race-$round" >/dev/null 2>&1 &
+    racer_pids="$racer_pids $!"
+    i=$((i + 1))
+  done
+  # Long enough that a winner has certainly exec'd claude and bumped the
+  # counter: undercounting here would be a false PASS on broken code.
+  sleep 1.5
+  after=$(invocation_count a)
+  winners=$((after - before))
+  race_total=$((race_total + winners))
+  [ "$winners" -ne 1 ] && race_bad=$((race_bad + 1))
+  [ "$winners" -gt "$race_worst" ] && race_worst="$winners"
+  # Kill exactly this round's racers -- baton execs, so each backgrounded pid
+  # IS its claude process. Never pkill by name: a sibling scenario's fixture
+  # must not be collateral.
+  for p in $racer_pids; do kill -KILL "$p" 2>/dev/null; done
+  wait 2>/dev/null
+  rm -rf "$LOCKROOT"
+done
+
+scenario_check "RACE: exactly one winner per round ($ROUNDS rounds x $RACERS racers; got $race_total winners, worst round $race_worst)" \
+  $([ "$race_total" -eq "$ROUNDS" ]; echo $?)
+scenario_check "RACE: no round had two writers live on one session at once" \
+  $([ "$race_bad" -eq 0 ]; echo $?)
+# Positive control on the race harness itself: if the racers never actually
+# ran, race_total would be 0 and the equality above would fail for the wrong
+# reason. Assert that claude really was invoked, at least once per round.
+scenario_check "RACE POSITIVE CONTROL: the racers actually ran claude" \
+  $([ "$race_total" -ge "$ROUNDS" ]; echo $?)
 
 cleanup_root
 scenario_end

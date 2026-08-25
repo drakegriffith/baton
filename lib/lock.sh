@@ -30,6 +30,18 @@
 # scheduled a microsecond apart both pass -- it is the exact bug being fixed,
 # written one level down.
 #
+# A LOCK IS ONLY AS ATOMIC AS ITS LEAST ATOMIC STEP. mkdir being atomic bought
+# nothing while the owner record it protects was written in four appends with
+# a fork in the middle: a racer that read the record in that gap saw half an
+# identity, scored it stale, and reclaimed a LIVE holder's lock. Measured at
+# 40 racers x 10 rounds through the real CLI: 59 winners for 10 sessions,
+# worst round 23 simultaneous writers. Two invariants now hold that down, and
+# both are load-bearing:
+#   1. the record is PUBLISHED BY RENAME, so it is never observable partial;
+#   2. only a DEFINITELY absent holder is reclaimable. "The witness did not
+#      answer" is its own state (unknown) and refuses, because a probe that
+#      could not inspect its subject has established nothing.
+#
 # EXIT CODES, and why there are three answers rather than two:
 #   0  acquired / inspected at least one lock subject
 #   1  inspected successfully and found ZERO lock subjects
@@ -62,27 +74,65 @@ is_lock_subject() {
   [ "${#1}" -le 128 ]
 }
 
-# proc_start PID -> a stable witness of WHICH process that pid currently is,
-# or empty if no such process exists. Pids are recycled (macOS wraps at
-# 99998), so "the pid is alive" alone would let an unrelated new process
-# inherit a dead session's lock and wedge baton until someone deleted the
-# directory by hand. The start time distinguishes them: a recycled pid
-# belongs to a process that started later than the one that wrote the record.
-proc_start() {
-  ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ' | sed 's/^ *//; s/ *$//'
+# proc_witness PID -- echo a stable witness of WHICH process that pid
+# currently is. Pids are recycled (macOS wraps at 99998), so "the pid is
+# alive" alone would let an unrelated new process inherit a dead session's
+# lock; the start time tells the original holder from a recycled pid.
+#
+# The RETURN CODE is the load-bearing part, and it has three values, not two:
+#   0  answered -- the process exists and its witness was printed
+#   1  the process definitively does not exist
+#   2  COULD NOT INSPECT -- something is there but this code cannot say what,
+#      or the inspection itself failed
+#
+# 2 must never be read as 1. The earlier version of this function returned an
+# empty string for both, and lock_probe scored empty as "stale" -- so a
+# transient `ps` or fork failure, which is exactly what the load this code
+# creates produces, read as "nobody holds this lock" and handed a live
+# session to a second writer. A probe that could not inspect its subject has
+# established nothing.
+#
+# kill -0 is asked first because it is a bash builtin: it forks nothing, so
+# it cannot fail merely because the machine is busy. It failing means either
+# "no such process" or "not yours", and ps is asked to tell those apart
+# rather than assuming the convenient one.
+proc_witness() {
+  local out
+  if kill -0 "$1" 2>/dev/null; then
+    out=$(ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ' | sed 's/^ *//; s/ *$//')
+    [ -n "$out" ] || return 2
+    printf '%s' "$out"
+    return 0
+  fi
+  ps -p "$1" >/dev/null 2>&1 && return 2
+  return 1
 }
 
-# lock_probe SUBJECT -> LOCK_STATE (free|pending|live|stale) and LOCK_PID.
-# Never mutates anything: the reporter and the acquirer share one reading of
-# what a lock directory means, so `--locks` cannot say "stale" about a lock
-# the acquirer would refuse.
+# lock_probe SUBJECT -> LOCK_STATE and LOCK_PID. Never mutates anything: the
+# reporter and the acquirer share one reading of what a lock directory means,
+# so `--locks` cannot say "stale" about a lock the acquirer would refuse.
+#
+# LOCK_STATE is one of:
+#   free     no lock directory
+#   pending  directory exists, owner record not published yet (young)
+#   live     the recorded pid is the recorded process
+#   stale    the recorded holder is definitively gone -- the ONLY reclaimable
+#            state
+#   unknown  a holder may exist and cannot be identified -- refuse, never
+#            reclaim
+# stale and unknown are separate on purpose. Collapsing them is the bug this
+# module was rewritten to remove.
 lock_probe() {
-  local d="$LOCKROOT/$1" owner pid start mt age
+  local d="$LOCKROOT/$1" owner pid start mt age witness rc
   LOCK_PID=""
   LOCK_SINCE=""
   if [ ! -d "$d" ]; then LOCK_STATE=free; return 0; fi
   owner="$d/owner"
   if [ ! -s "$owner" ] || [ ! -r "$owner" ]; then
+    # No published record. Because the record is published by rename (see
+    # lock_acquire), this can only be the gap between mkdir and that rename,
+    # which is young by construction; anything old is debris from a process
+    # that died inside that gap.
     mt=$(stat -f %m "$d" 2>/dev/null) || { LOCK_STATE=pending; return 0; }
     age=$(( $(now) - mt ))
     if [ "$age" -lt "$LOCK_GRACE_SECS" ]; then LOCK_STATE=pending; else LOCK_STATE=stale; fi
@@ -92,12 +142,24 @@ lock_probe() {
   start=$(awk '$1=="start"{sub(/^[ \t]*start[ \t]+/, "", $0); print $0; exit}' "$owner" 2>/dev/null)
   LOCK_PID="$pid"
   LOCK_SINCE=$(awk '$1=="since"{print $2; exit}' "$owner" 2>/dev/null)
-  case "$pid" in ''|*[!0-9]*) LOCK_STATE=stale; return 0 ;; esac
-  if [ "$(proc_start "$pid")" = "$start" ] && [ -n "$start" ]; then
-    LOCK_STATE=live
-  else
-    LOCK_STATE=stale
+  case "$pid" in ''|*[!0-9]*) pid="" ;; esac
+  if [ -z "$pid" ] || [ -z "$start" ]; then
+    # A record that exists but carries only half an identity. rename() means
+    # this implementation never publishes one, so it is foreign, hand-edited,
+    # or written by a pre-fix baton. Half a record is not evidence that nobody
+    # holds the lock, so it is never reclaimed on identity grounds -- only on
+    # age, once any write window it could have come from has long closed.
+    mt=$(stat -f %m "$owner" 2>/dev/null) || { LOCK_STATE=unknown; return 0; }
+    age=$(( $(now) - mt ))
+    if [ "$age" -ge "$LOCK_GRACE_SECS" ]; then LOCK_STATE=stale; else LOCK_STATE=unknown; fi
+    return 0
   fi
+  witness=$(proc_witness "$pid"); rc=$?
+  case "$rc" in
+    0) if [ "$witness" = "$start" ]; then LOCK_STATE=live; else LOCK_STATE=stale; fi ;;
+    1) LOCK_STATE=stale ;;
+    *) LOCK_STATE=unknown ;;
+  esac
 }
 
 # lock_acquire SUBJECT WHAT -- 0 on success, 3 when a live (or still-being-
@@ -110,7 +172,7 @@ lock_probe() {
 # loser's source is already gone), so destruction is single-shot, and both
 # then fall back to the same mkdir arbiter that decides everything else.
 lock_acquire() {
-  local subject="$1" what="${2:-}" d tries=0 trash
+  local subject="$1" what="${2:-}" d tries=0 trash mystart stamp tmp w
   is_lock_subject "$subject" || return 2
   mkdir -p "$LOCKROOT" 2>/dev/null || return 2
   [ -w "$LOCKROOT" ] && [ -x "$LOCKROOT" ] || return 2
@@ -118,17 +180,54 @@ lock_acquire() {
   while [ "$tries" -lt 20 ]; do
     tries=$((tries + 1))
     if mkdir "$d" 2>/dev/null; then
+      # PUBLISH BY RENAME, never by append, and compute every value BEFORE
+      # the record is written so no fork can interleave with the write.
+      #
+      # What this replaces, and why it mattered: four printfs into one
+      # redirect, the second of which was `printf 'start %s\n' "$(proc_start
+      # $$)"` -- a command substitution, i.e. a fork and an exec of ps, in the
+      # middle of the write. A racer that read the file in that gap saw a pid
+      # with no start line, and the old probe scored a half-written record
+      # `stale` and reclaimed it. mkdir was atomic the whole time; the record
+      # mkdir exists to protect was not, and a lock is only as atomic as its
+      # least atomic step.
+      #
+      # Measured on this machine before the fix, 40 racers x 10 rounds
+      # through the real CLI: 59 winners for 10 sessions, worst round 23
+      # simultaneous writers on ONE session. rename(2) within a directory is
+      # atomic, so the record now appears at its final path complete or not
+      # at all, and no reader can observe a half-identity.
+      #
+      # If this process cannot witness ITSELF, it does not publish a record it
+      # could not later prove: it gives the directory back and reports
+      # could-not-inspect. Refusing to launch is the safe direction; taking a
+      # lock nobody can verify is the unsafe one.
+      mystart=""; w=0
+      while [ "$w" -lt 3 ]; do
+        mystart=$(proc_witness $$) && break
+        mystart=""; w=$((w + 1)); sleep 0.05
+      done
+      if [ -z "$mystart" ]; then rmdir "$d" 2>/dev/null; return 2; fi
+      stamp=$(now)
+      tmp="$d/.owner.$$"
       {
         printf 'pid %s\n' "$$"
-        printf 'start %s\n' "$(proc_start $$)"
+        printf 'start %s\n' "$mystart"
         printf 'what %s\n' "$what"
-        printf 'since %s\n' "$(now)"
-      } > "$d/owner" 2>/dev/null || { rm -rf "$d"; return 2; }
+        printf 'since %s\n' "$stamp"
+      } > "$tmp" 2>/dev/null || { rm -rf "$d"; return 2; }
+      mv -f "$tmp" "$d/owner" 2>/dev/null || { rm -rf "$d"; return 2; }
       return 0
     fi
     lock_probe "$subject"
     case "$LOCK_STATE" in
       live) return 3 ;;
+      unknown)
+        # A holder may exist and cannot be identified. Reclaiming here is the
+        # unsafe direction and is exactly what the old code did; refusing is
+        # the safe one. No retry: unlike `pending`, waiting does not make an
+        # unanswerable question answerable.
+        return 3 ;;
       pending)
         # The winner's mkdir has landed but its owner record has not yet.
         # Refusing THIS instant would refuse without naming a pid, and naming
@@ -179,6 +278,10 @@ lock_take() {
   fi
   if [ "$LOCK_STATE" = pending ]; then
     echo "baton: refusing to launch '$subject': another baton took that lock in the last ${LOCK_GRACE_SECS}s and has not recorded its pid yet. Try again in a moment, or run: baton --locks" >&2
+  elif [ "$LOCK_STATE" = unknown ]; then
+    # Deliberately refuses rather than reclaims. Naming what could not be
+    # established beats inventing a holder or pretending there is none.
+    echo "baton: refusing to launch '$subject': a lock exists that baton cannot identify (recorded pid '${LOCK_PID:-none}' could not be verified). Could-not-inspect is not 'no lock is held'. Run: baton --locks" >&2
   else
     echo "baton: refusing to launch '$subject': it is already held by pid $LOCK_PID, which is still running. Two processes on one session is what destroys it -- go back to pid $LOCK_PID, or wait for it to exit. See: baton --locks" >&2
   fi

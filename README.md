@@ -150,9 +150,11 @@ second launch however the two commands arrived.
 So baton takes a lock first. Before any launch carrying `--resume <id>` -- the
 interactive path, and each `--night` handoff -- it creates
 `~/.claude-accounts/.locks/session-<id>/` with `mkdir` (atomic: the loser's
-`mkdir` fails, so there is no test-then-write window) and records its own pid
-and that pid's start time. A second launch of the same id refuses, names the
-pid that holds it, and exits 3 without ever running `claude`:
+`mkdir` fails, so there is no test-then-write window), then publishes an owner
+record naming its pid and that pid's start time by writing a temp file and
+renaming it into place, so no reader can ever catch the record half-written.
+A second launch of the same id refuses, names the pid that holds it, and exits
+3 without ever running `claude`:
 
 ```
 $ baton --resume 0f3c...  # while another one is already open on it
@@ -187,9 +189,34 @@ three-account `auth` cascade this fix came out of; `claude`'s own
 `.oauth_refresh.lock` sits next to *one* credentials store and cannot see a
 second `CLAUDE_CONFIG_DIR` logging into the same Anthropic account.
 
-Not covered: a cold start and `baton -c`. Neither carries a session id at
-launch -- the id only becomes knowable once a transcript grows -- and a lock
-keyed on a guess is worse than none.
+### What the lock does NOT cover
+
+Read this before assuming you are protected. The lock keys on a session id,
+and only these command shapes carry one at launch:
+
+| Command | Locked? |
+|---|---|
+| `baton --resume <id>` / `--resume=<id>` | **yes**, one writer |
+| `baton --night` after a handoff (`--resume <id>`) | **yes**, one writer |
+| `baton -c` | no |
+| `baton` (cold start) | no |
+| `baton <account>` | no |
+| `baton --night`'s own `-c` fallback | no |
+
+The unlocked rows are not an oversight, but they are also not narrow. Two
+simultaneous `baton <account>` invocations produce two writers and zero lock
+subjects -- and `baton <account>` is exactly the command shape the "this
+account needs `/login`" instruction asks you to run, which is the command
+shape that started the 2026-08-25 incident. `--night`'s `-c` fallback is
+unguarded for the same reason.
+
+The reason is the same in every case: there is no session id at launch. The id
+only becomes knowable once a transcript grows, so any key invented at launch
+would be a guess, and a lock keyed on a guess is worse than none -- it reports
+protection it does not provide. Closing these needs a real key (claude
+emitting its session id at startup, or baton resolving one before launch), not
+a heuristic. Until then: **do not run two of these at once in the same
+directory.**
 
 ## How the limit is detected
 
