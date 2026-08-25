@@ -682,6 +682,99 @@ unset BATON_ACCOUNTS_ROOT
 block_end
 
 # ============================================================================
+# 15. The morning after: the host died mid-run and two terminals came back.
+#     baton#2 acceptance: "A kill-and-double-relaunch QA scenario proves
+#     exactly one survivor claims the session."
+#
+#     This is the one block that is not in features/failover.feature, and it
+#     is deliberately last, because it is the story that starts where every
+#     other block ends: a run that was interrupted rather than finished. The
+#     operator opens two terminals (or a launchd relaunch races an
+#     interactive start), both read the same board, and both want to pick the
+#     same session back up. Exactly one may.
+# ============================================================================
+block_begin "15 kill-and-double-relaunch: exactly one survivor claims the session" "baton#2 acceptance"
+fresh_root
+export BATON_LOCK_PROV=test
+
+SID="sess-morning-after"
+write_behavior a <<'EOF'
+STEP_BLOCK=(1)
+STEP_TRANSCRIPT=("sess-morning-after")
+STEP_STDOUT=("half way through the night")
+EOF
+
+start_night
+f="$(wait_for_transcript a 10)"
+check "the night's session was really running before the host died" $([ -n "$f" ]; echo $?)
+
+# The host dies: the parent goes, the child is reparented and keeps running.
+stop_night
+
+RUNS="$BATON_ACCOUNTS_ROOT/.runs"
+start_receipt="$(ls -1 "$RUNS"/*.start 2>/dev/null | head -1)"
+check "a start receipt survived the host" $([ -n "$start_receipt" ]; echo $?)
+Q15_UNIT="$(basename "${start_receipt:-none}" .start)"
+Q15_ORPHAN="$(sed -n 's/^pid=//p' "${start_receipt:-/dev/null}" 2>/dev/null | head -1)"
+
+# Both terminals read the identical board, because the board is a projection
+# and carries no ownership. That is correct, and it is exactly why the board
+# cannot be the thing that arbitrates.
+board_a="$("$BATON_BIN" --pickup 2>/dev/null)"
+board_b="$("$BATON_BIN" --pickup 2>/dev/null)"
+check "both terminals see the same board (a projection arbitrates nothing)" \
+  $([ "$(printf '%s' "$board_a" | grep -c '"unit"')" = "$(printf '%s' "$board_b" | grep -c '"unit"')" ]; echo $?)
+check "the board inspected more than zero units" \
+  $(printf '%s' "$board_a" | grep -qE '"inspected": [1-9]'; echo $?)
+
+# Both terminals now try to pick the session back up. The work each would do
+# is represented by one line appended to a shared log; two lines is the
+# duplicate this whole issue is about.
+Q15_LOG="$SCRATCH/relaunches.log"
+: > "$Q15_LOG"
+"$BATON_BIN" --claim "session:$SID" -- sh -c "echo relaunched >> '$Q15_LOG'; sleep 2" \
+  >"$SCRATCH/t1.out" 2>"$SCRATCH/t1.err" &
+T1=$!
+"$BATON_BIN" --claim "session:$SID" -- sh -c "echo relaunched >> '$Q15_LOG'; sleep 2" \
+  >"$SCRATCH/t2.out" 2>"$SCRATCH/t2.err" &
+T2=$!
+wait "$T1"; Q15_RC1=$?
+wait "$T2"; Q15_RC2=$?
+
+q15_relaunches=$(grep -c relaunched "$Q15_LOG" 2>/dev/null || true)
+q15_winners=0
+[ "$Q15_RC1" -eq 0 ] && q15_winners=$((q15_winners + 1))
+[ "$Q15_RC2" -eq 0 ] && q15_winners=$((q15_winners + 1))
+
+check "exactly one relaunch happened" $([ "$q15_relaunches" -eq 1 ]; echo $?)
+check "exactly one terminal survived the claim" $([ "$q15_winners" -eq 1 ]; echo $?)
+check "the relaunch count is positive (not simply both refused)" $([ "$q15_relaunches" -gt 0 ]; echo $?)
+
+if [ "$Q15_RC1" -ne 0 ]; then q15_loser="$SCRATCH/t1.err"; q15_winner="$T2"; else q15_loser="$SCRATCH/t2.err"; q15_winner="$T1"; fi
+check "the losing terminal exited nonzero" $([ "$Q15_RC1" -ne 0 ] || [ "$Q15_RC2" -ne 0 ]; echo $?)
+check "the losing terminal was told which pid held the session" $(grep -q "$q15_winner" "$q15_loser"; echo $?)
+
+# And the orphan the night left behind: redoing that unit kills it and
+# CONFIRMS the death before the replacement starts. The replacement's first
+# instruction is the probe, so any window in which both were alive is exactly
+# what it would capture.
+check "the orphan from the interrupted night is still alive" \
+  $([ -n "$(ps -p "${Q15_ORPHAN:-0}" -o args= 2>/dev/null)" ]; echo $?)
+"$BATON_BIN" --redispatch "$Q15_UNIT" -- \
+  sh -c "ps -p $Q15_ORPHAN -o args= > '$SCRATCH/q15-overlap' 2>/dev/null; echo replaced >> '$SCRATCH/q15-replacements.log'" \
+  >/dev/null 2>&1
+q15_redrc=$?
+check "the redispatch exited 0" $([ "$q15_redrc" -eq 0 ]; echo $?)
+check "the replacement ran exactly once" \
+  $([ "$(grep -c replaced "$SCRATCH/q15-replacements.log" 2>/dev/null || echo 0)" -eq 1 ]; echo $?)
+check "there was no window in which the orphan and its replacement were both alive" \
+  $([ ! -s "$SCRATCH/q15-overlap" ]; echo $?)
+
+unset BATON_LOCK_PROV
+cleanup_root
+block_end
+
+# ============================================================================
 # Tally
 # ============================================================================
 total=$(grep -cE '^(PASS|FAIL) block' "$QA_RESULTS" 2>/dev/null)
@@ -691,10 +784,13 @@ failed=$(grep -c '^FAIL block' "$QA_RESULTS" 2>/dev/null)
 echo ""
 echo "----"
 grep '^FAIL block' "$QA_RESULTS" 2>/dev/null || true
-echo "QA BLOCKS: $total  PASS: $passed  FAIL: $failed  (14 expected: one per Gherkin scenario in features/failover.feature, background excluded, scenarios 15-26 excluded per assignment)"
+echo "QA BLOCKS: $total  PASS: $passed  FAIL: $failed  (15 expected: 14 from features/failover.feature -- background excluded, scenarios 15-26 excluded per assignment -- plus block 15, the kill-and-double-relaunch walkthrough baton#2 asks this workflow to carry)"
 
-if [ "$total" -ne 14 ]; then
-  echo "qa_failover: expected exactly 14 assertion blocks, got $total" >&2
+# The count is asserted, not reported. A block that died mid-file writes no
+# result line, and a missing line is invisible in a PASS/FAIL tally: the
+# workflow would just report one fewer block and still exit 0.
+if [ "$total" -ne 15 ]; then
+  echo "qa_failover: expected exactly 15 assertion blocks, got $total" >&2
   exit 1
 fi
 

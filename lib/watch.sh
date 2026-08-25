@@ -158,6 +158,26 @@ EOF
 #                     session is over, not paused).
 run_watched() {
   local name="$1" resume_mode="$2"; shift 2
+
+  # Single-writer guard on the session id (baton#2 root cause 1). All accounts
+  # share projects/ through the harness symlink, so a session id names ONE
+  # transcript that any account can reopen -- which is what makes two
+  # simultaneous `--resume <id>` launches possible in the first place. One of
+  # them absorbs the session and the other clobbers the pointer state.
+  #
+  # The claim is re-entrant for this process: a night that hands one session
+  # from account to account is one writer resuming, not two, and lock.sh
+  # answers `claimed` when the holder pid is our own. The lock needs no
+  # explicit release -- the owner record carries this pid and its start time,
+  # so this process dying IS the release, which is the only kind that
+  # survives a host restart.
+  local lock_sid=""
+  case "$resume_mode" in resume:*) lock_sid="${resume_mode#resume:}" ;; esac
+  if [ -n "$lock_sid" ]; then
+    lock_claim "session:$lock_sid" \
+      || die "not resuming session '$lock_sid': another live process is writing it"
+  fi
+
   set_envargs "$name"
   local tdir; tdir=$(transcript_dir_for "$CONFIG_DIR")
   mkdir -p "$tdir"

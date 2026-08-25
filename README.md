@@ -131,6 +131,51 @@ Give a bigger plan more launches: `echo 3 > ~/.claude-accounts/big/.weight`.
 | `BATON_MAX_HANDOFFS` | `3` | account switches per run before giving up |
 | `BATON_SESSION_WAIT_SECS` | `30` | accepted and validated, but inert: the watcher now spots the running session by which transcript file grows, so it never waits for one to appear |
 
+## Only one writer per subject (`--lock-status`, `--claim`, `--redispatch`)
+
+`--pickup` tells a restarted agent what was in flight. It deliberately does not
+tell it whether someone else is already acting on that. The board is a
+projection: reading it is idempotent by design, which is correct for a
+projection and is exactly why the projection cannot be the thing that
+arbitrates. Two terminals read the identical board and both re-dispatch the
+same unit.
+
+The arbiter is a lock with a **subject**, not a lockfile per feature. A session
+id, a run unit and an account's login flow all want the same three things -- an
+owner record with enough identity to survive a reboot, a staleness rule that
+can reclaim without a human, and a refusal that names the holder -- so they are
+one mechanism with a subject argument. The next lockable thing costs a string.
+
+```sh
+baton --lock-status session:<id>          # free | held | stale-dead | stale-foreign | could-not-inspect
+baton --claim unit:<name> -- <command>    # run the command, or refuse naming the pid that has it
+baton --redispatch <unit> -- <command>    # kill the matched orphan, CONFIRM it, then replace it
+```
+
+Three things are worth knowing before you rely on it:
+
+- **A held lock names the pid that holds it.** Refusal is not "try later"; it
+  is "pid 4242 is writing this right now". Ask `--lock-status` for the rest.
+- **A dead owner never deadlocks a subject.** The owner record carries the
+  pid *and* the process start time, so a pid that has exited is reclaimable,
+  and a pid that some stranger inherited after a reboot is reclaimable too. A
+  bare pid in a lockfile would let that stranger hold the subject forever.
+  Start time is also what lets the lock survive `exec`: `baton <account>`
+  replaces itself with `claude`, keeps its pid, and keeps its claim.
+- **Could-not-inspect is exit 2, and it is not a free lock.** If the process
+  table cannot be reached or the lock directory cannot be read, nothing is
+  claimed and nothing is reclaimed. An unreachable `ps` would otherwise report
+  every live holder as dead, which is precisely how the duplicate this exists
+  to prevent gets launched.
+
+`BATON_LOCK_DISABLE=1` turns every claim into a no-op. It exists because a
+guard that can strand you with no way through is worse than the failure it
+prevents; it is a knob, and the refusal message names it rather than handing
+you a command line to paste.
+
+The evidence layer never depends on the claim layer: `--pickup` works with no
+lock root present at all, and never creates one.
+
 ## How the limit is detected
 
 One shared classifier (`lib/detect.sh`) partitions every observation into

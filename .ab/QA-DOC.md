@@ -137,6 +137,23 @@ Rules:
    forced-account, plain auto-pick) depend on `accounts` only, exactly as
    today, and must not start pulling in `watch` (a forbidden dependency in
    the other direction: existing flags -> watch).
+5b. **Amendment (baton#2, the lock root).** `lib/lock.sh` joins the graph as
+   `lock -> runs`, and nothing else. Only `baton` and `watch` may depend on
+   `lock`; `pickup` must never, because the evidence layer has to keep working
+   with no lock installed (scenario 30 asserts `--pickup` answers with no lock
+   root present and creates none).
+
+   This amends rule 5 in one specific place, deliberately and not silently:
+   the forced-account path (`baton <account>`) now sources `runs` and `lock`
+   before launching, because that path IS baton's login flow -- it is verbatim
+   the command the not-logged-in handoff tells the operator to run -- and
+   baton#2 root cause 3 is two of them rotating each other's OAuth token. The
+   forbidden edge rule 5 was written to prevent is unchanged and still tested:
+   existing flags must not pull in **watch**. The claim is silent on success,
+   so scenario 12's byte-for-byte comparison against the pre-failover script
+   still holds for `--status`, `--pick`, `--dead`, `--revive`, `--next`,
+   `--fast` and the forced account.
+
 6. **Tests never depend on the real `$HOME/.claude-accounts`.** Every test
    sets `BATON_ACCOUNTS_ROOT` to a fresh temp dir. This is a forbidden
    dependency: test harness -> ambient home directory. Section 6 gives a test

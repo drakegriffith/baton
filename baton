@@ -47,6 +47,20 @@
 #   baton --pick                  print auto-pick choice (dead-filter + tally
 #                               only; does NOT probe)
 #   baton --reset                 zero tallies
+#   baton --lock-status <subject>   what the lock root says about one subject
+#                               (free / held / stale-dead / stale-foreign /
+#                               could-not-inspect) and how many subjects it
+#                               managed to inspect. Exit 0 free-or-reclaimable,
+#                               1 held, 2 could-not-inspect (never a pass).
+#   baton --claim <subject> -- <cmd...>   run cmd while holding the lock on
+#                               that subject; refuse, naming the holding pid,
+#                               if a live owner already has it. Subjects are
+#                               namespaced text: session:<id>, unit:<name>,
+#                               login:<account>.
+#   baton --redispatch <unit> -- <cmd...>  redo a run unit rather than adopt
+#                               it: claim it, kill the matched orphan, CONFIRM
+#                               it is gone by re-probing, and only then launch
+#                               the replacement.
 #   baton --night [claude args...]  unattended mode: auto-pick like plain
 #                               baton, but watch the live transcript for a
 #                               limit/auth hit and hand off to the next
@@ -175,26 +189,87 @@ case "${1:-}" in
     auto_launch fast "$@" ;;
   --night)
     shift
-    # runs.sh before watch.sh: the watcher records a receipt the moment it
-    # has a pid, so the recorder has to be defined before the launcher runs.
+    # runs.sh before lock.sh before watch.sh: the watcher records a receipt
+    # the moment it has a pid and claims a session before resuming one, so
+    # both the recorder and the arbiter have to be defined before the
+    # launcher runs. lock -> runs is the only edge between the two.
     . "$SCRIPT_DIR/lib/runs.sh"
+    . "$SCRIPT_DIR/lib/lock.sh"
     . "$SCRIPT_DIR/lib/watch.sh"
     night_mode "$@" ;;
   --pickup)
     # Read-only: what did the last session leave behind. Deliberately does
     # NOT source watch.sh -- pickup answers a question about dead runs and
     # must never be able to start one (the same forbidden direction QA-DOC
-    # section 4 rule 5 draws for the existing flags).
+    # section 4 rule 5 draws for the existing flags). It also does NOT source
+    # lock.sh: the evidence layer must keep working with no lock installed,
+    # so the board can never come to depend on the claim layer (baton#2's
+    # added acceptance).
     shift
     . "$SCRIPT_DIR/lib/pickup.sh"
     . "$SCRIPT_DIR/lib/runs.sh"
     runs_project
+    exit $? ;;
+  --lock-status)
+    # What does the lock root say about one subject, and did it manage to
+    # look? Exit 0 free-or-reclaimable, 1 held, 2 could-not-inspect. `inspected`
+    # is printed because a caller that asserts "nothing is locked" without it
+    # is asserting an absence it never established.
+    shift
+    [ -n "${1:-}" ] || die "--lock-status <subject>"
+    . "$SCRIPT_DIR/lib/runs.sh"
+    . "$SCRIPT_DIR/lib/lock.sh"
+    lock_probe "$1"; lock_rc=$?
+    printf 'subject=%s state=%s holder_pid=%s prov=%s inspected=%s\n' \
+      "$1" "$LOCK_STATE" "${LOCK_HOLDER_PID:-}" "${LOCK_HOLDER_PROV:-}" "$LOCK_INSPECTED"
+    exit "$lock_rc" ;;
+  --claim)
+    # The arbitration `--pickup` deliberately does not do. The board is a
+    # projection and stays read-only; THIS is where two restarted
+    # orchestrators find out that only one of them may act on it.
+    #
+    # The command to run is mandatory, and that is the design: a claim taken
+    # by a process that immediately exits is stale the instant it is written,
+    # so the claim and the work it guards are one invocation.
+    shift
+    [ -n "${1:-}" ] || die "--claim <subject> -- <command...>"
+    lock_subject="$1"; shift
+    . "$SCRIPT_DIR/lib/runs.sh"
+    . "$SCRIPT_DIR/lib/lock.sh"
+    lock_hold "$lock_subject" "$@"
+    exit $? ;;
+  --redispatch)
+    # Redo a unit rather than adopt it: claim it, kill the matched orphan,
+    # CONFIRM it is gone, and only then launch the replacement. Without the
+    # confirmation this flag would be the duplicate baton#2 is about, with
+    # the operator's blessing.
+    shift
+    [ -n "${1:-}" ] || die "--redispatch <unit> -- <command...>"
+    lock_unit="$1"; shift
+    . "$SCRIPT_DIR/lib/runs.sh"
+    . "$SCRIPT_DIR/lib/lock.sh"
+    lock_redispatch "$lock_unit" "$@"
     exit $? ;;
   *)
     [ ${#accounts[@]} -gt 0 ] || die "no accounts under $ROOT; run: baton --add <name>"
     if [ $# -ge 1 ] && is_account "$1"; then
       acct="$1"; shift
       is_dead "$acct" && warn "'$acct' is marked dead until $(date -r "$(dead_until "$acct")" 2>/dev/null) -- launching anyway (forced)"
+      # baton#2 root cause 3: serialize login flows, one at a time, per
+      # account. `baton <account>` IS baton's login flow -- it is the exact
+      # command the not-logged-in handoff tells the operator to run, and two
+      # of them running at once for one account is two OAuth refreshes
+      # rotating each other's token, which is the shape of the 2026-08-25
+      # auth cascade. Silent on success, so this path's stdout/stderr stay
+      # byte-identical to the pre-failover script (scenario 12).
+      #
+      # The lock survives the `exec` below on purpose: exec keeps the pid and
+      # the process start time, and pid+start-time is the identity lock.sh
+      # matches on, so the claim stays valid for exactly as long as the
+      # launched session lives and goes stale the moment it dies.
+      . "$SCRIPT_DIR/lib/runs.sh"
+      . "$SCRIPT_DIR/lib/lock.sh"
+      lock_claim "login:$acct" || exit $?
       launch "$acct" "$@"
     else
       auto_launch probe "$@"
