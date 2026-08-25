@@ -74,7 +74,18 @@
 # (state + selection + probing), watch.sh (--night's child-process control).
 
 set -u
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# lib/ sits beside the REAL script, so a symlink on PATH must be followed to
+# its target before dirname; readlink is looped because a link can point at
+# a link, and a relative link target is relative to the link's own dir.
+SCRIPT_PATH="${BASH_SOURCE[0]:-$0}"
+while [ -L "$SCRIPT_PATH" ]; do
+  _link=$(readlink "$SCRIPT_PATH")
+  case "$_link" in
+    /*) SCRIPT_PATH="$_link" ;;
+    *)  SCRIPT_PATH="$(dirname "$SCRIPT_PATH")/$_link" ;;
+  esac
+done
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
 
 die() { echo "baton: $*" >&2; exit 1; }
 warn() { echo "baton: $*" >&2; }
