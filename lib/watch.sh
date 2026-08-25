@@ -2,7 +2,7 @@
 # watch -- child-process control for `baton --night`. Depends on detect
 # (classify_text, for both the live-transcript and post-exit-probe paths)
 # and on accounts' public surface only (ranked/pick_live, mark_dead_for_class,
-# probe, set_envargs, bump, die_no_live_account) -- never on accounts'
+# probe, set_envargs, bump, die_no_live_account, is_uint/is_unum) -- never on accounts'
 # private state files directly, and never a second copy of the LIMIT/AUTH
 # regex family.
 #
@@ -10,6 +10,32 @@
 # scenario in tests/scenarios): watch's only filesystem reads are transcript
 # JSONL files under <config-dir>/projects/<slug>/. It never opens
 # .claude.json, a credentials file, or anything else under an account dir.
+
+# night_knobs -- resolve --night's three numeric env knobs ONCE, before any
+# child is launched, or die. Unset or empty keeps the documented default;
+# anything else must be a number, because all three fail PAST baton's error
+# contract otherwise. Measured on the pre-hardening code:
+#   BATON_WATCH_INTERVAL=abc     `sleep abc` failed on every poll, so the
+#     watcher span at ~12% CPU and wrote 87 KB of shell errors in 3 seconds
+#     -- all night, into whatever log the unattended run was pointed at.
+#   BATON_MAX_HANDOFFS=abc       `[ n -gt abc ]` printed a raw
+#     "integer expression expected" and then answered false forever: the cap
+#     silently stopped existing and the run rotated until accounts ran out.
+#   BATON_SESSION_WAIT_SECS=abc  the awk give-up comparison never fired, so
+#     the documented fallback from `--resume <id>` to `-c` stopped existing.
+# Sets NIGHT_INTERVAL, NIGHT_WAIT_SECS and NIGHT_MAX_HANDOFFS, which
+# run_watched and night_mode read INSTEAD of the environment -- one reader
+# per knob, so a knob cannot mean one thing at validation time and another
+# at use time. run_watched is only ever called from night_mode, which calls
+# this first.
+night_knobs() {
+  NIGHT_INTERVAL="${BATON_WATCH_INTERVAL:-5}"
+  NIGHT_WAIT_SECS="${BATON_SESSION_WAIT_SECS:-30}"
+  NIGHT_MAX_HANDOFFS="${BATON_MAX_HANDOFFS:-3}"
+  is_unum "$NIGHT_INTERVAL" || die "bad BATON_WATCH_INTERVAL '$NIGHT_INTERVAL' (want seconds, e.g. 5)"
+  is_unum "$NIGHT_WAIT_SECS" || die "bad BATON_SESSION_WAIT_SECS '$NIGHT_WAIT_SECS' (want seconds, e.g. 30)"
+  is_uint "$NIGHT_MAX_HANDOFFS" || die "bad BATON_MAX_HANDOFFS '$NIGHT_MAX_HANDOFFS' (want a whole number, e.g. 3)"
+}
 
 # transcript_dir_for CONFIG_DIR -> that account's transcript dir for $PWD,
 # using the exact slug rule DOC.md gives the real CLI (absolute cwd, `/` and
@@ -78,8 +104,8 @@ run_watched() {
   fi
   local pid=$!
 
-  local interval="${BATON_WATCH_INTERVAL:-5}"
-  local wait_secs="${BATON_SESSION_WAIT_SECS:-30}"
+  local interval="$NIGHT_INTERVAL"
+  local wait_secs="$NIGHT_WAIT_SECS"
   local newfile="" offset=0 elapsed=0 gave_up_looking=0
 
   while kill -0 "$pid" 2>/dev/null; do
@@ -136,8 +162,9 @@ run_watched() {
 # handoff, carrying forward --resume/-c) until either the child exits on its
 # own, every account is exhausted, or BATON_MAX_HANDOFFS is hit.
 night_mode() {
-  local max_handoffs="${BATON_MAX_HANDOFFS:-3}"
-  local handoffs=0 resume_mode="" acct prev
+  local handoffs=0 resume_mode="" acct prev max_handoffs
+  night_knobs
+  max_handoffs="$NIGHT_MAX_HANDOFFS"
 
   pick_live probe || die_no_live_account
   acct="$PICKED"

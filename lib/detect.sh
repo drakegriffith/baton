@@ -32,6 +32,16 @@ try:
     from zoneinfo import ZoneInfo
 except ImportError:
     ZoneInfo = None
+def resolve_tz(name):
+    # The (TZ) group is free text from a CLI message: absent, empty, or a
+    # zone this python has no database for all mean the same thing -- read
+    # the clock time in local time instead.
+    if not (name and ZoneInfo):
+        return None
+    try:
+        return ZoneInfo(name)
+    except Exception:
+        return None
 msg = sys.stdin.read()
 m = re.search(r"resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)(?:\s*\(([^)]+)\))?", msg, re.I)
 if not m:
@@ -40,11 +50,7 @@ h = int(m.group(1)) % 12
 if m.group(3).lower() == "pm":
     h += 12
 mi = int(m.group(2) or 0)
-tz = None
-if m.group(4) and ZoneInfo:
-    try: tz = ZoneInfo(m.group(4))
-    except Exception: tz = None
-nowt = datetime.datetime.now(tz)
+nowt = datetime.datetime.now(resolve_tz(m.group(4)))
 t = nowt.replace(hour=h, minute=mi, second=0, microsecond=0)
 if t <= nowt:
     t += datetime.timedelta(days=1)

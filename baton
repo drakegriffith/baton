@@ -60,6 +60,7 @@
 #
 # Env overrides (all optional, all no-ops on default behavior when unset):
 #   BATON_ACCOUNTS_ROOT      accounts root (default: $HOME/.claude-accounts)
+#   BATON_EXCLUDE            account name auto-pick must skip (any mode)
 #   BATON_WATCH_INTERVAL     --night poll interval, seconds (default: 5)
 #   BATON_MAX_HANDOFFS       --night handoff cap per run (default: 3)
 #   BATON_SESSION_WAIT_SECS  --night max wait for a transcript file before
@@ -115,7 +116,7 @@ case "${1:-}" in
   --pick)
     ranked "${2:-}" | head -1; exit 0 ;;
   --probe)
-    [ -n "${2:-}" ] && [ -d "$ROOT/$2" ] || die "--probe <account>"
+    [ -n "${2:-}" ] && is_account "$2" || die "--probe <account>"
     probe "$2"
     echo "$2 $PROBE_CLASS"
     [ "$PROBE_CLASS" = LIMIT ] && echo "dead until: $(date -r "$(dead_until "$2")" 2>/dev/null)"
@@ -132,7 +133,7 @@ case "${1:-}" in
     exit 0 ;;
   --dead)
     name="${2:-$(cat "$LAST" 2>/dev/null)}"; [ -n "$name" ] || die "--dead <name> (no last-used account)"
-    [ -d "$ROOT/$name" ] || die "no account '$name'"
+    is_account "$name" || die "no account '$name'"
     # die inside $() only exits the subshell, so the failure must be re-raised here
     dur=$(parse_duration "${3:-$DEFAULT_DEAD}") || exit 1
     mark_dead "$name" "$(( $(now) + dur ))" manual
@@ -140,6 +141,9 @@ case "${1:-}" in
     exit 0 ;;
   --revive)
     [ -n "${2:-}" ] || die "--revive <name>"
+    # is_account, not [ -d ]: this line deletes a path built from operator
+    # input, so "../a" must never reach it.
+    is_account "$2" || die "no account '$2'"
     rm -f "$DEADDIR/$2"; echo "baton: '$2' revived"; exit 0 ;;
   --reset)
     rm -f "$TALLY" "$LAST"; echo "baton: tallies reset"; exit 0 ;;
@@ -159,7 +163,7 @@ case "${1:-}" in
     night_mode "$@" ;;
   *)
     [ ${#accounts[@]} -gt 0 ] || die "no accounts under $ROOT; run: baton --add <name>"
-    if [ $# -ge 1 ] && [ -d "$ROOT/$1" ]; then
+    if [ $# -ge 1 ] && is_account "$1"; then
       acct="$1"; shift
       is_dead "$acct" && warn "'$acct' is marked dead until $(date -r "$(dead_until "$acct")" 2>/dev/null) -- launching anyway (forced)"
       launch "$acct" "$@"

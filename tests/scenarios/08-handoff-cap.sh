@@ -25,6 +25,12 @@ scenario_check "exit nonzero" $([ "$NIGHT_EXIT" -ne 0 ]; echo $?)
 scenario_check "stderr names the cap 1" $(grep -q "1" "$SCRATCH/night.err"; echo $?)
 scenario_check "stderr names BATON_MAX_HANDOFFS" $(grep -q "BATON_MAX_HANDOFFS" "$SCRATCH/night.err"; echo $?)
 scenario_check "c never probed or launched" $([ "$(invocation_count c)" -eq 0 ]; echo $?)
+# The cap is a cap ON handoffs, not on launches: BATON_MAX_HANDOFFS=1 must
+# ALLOW the first handoff (a -> b) and refuse only the second. An off-by-one
+# in the comparison turns "1" into "none", which is a different feature and
+# every assertion above still passes.
+scenario_check "the one permitted handoff did happen (b ran)" $([ "$(invocation_count b)" -ge 1 ]; echo $?)
+scenario_check "b was launched, not merely probed" $(grep -q "config=$(config_dir_of b) " "$(fake_log)"; echo $?)
 
 unset BATON_MAX_HANDOFFS
 cleanup_root
