@@ -105,22 +105,11 @@ _lock_key() {
   printf '%s' "${out:0:180}"
 }
 
-# _lock_birth FINGERPRINT -- the start-time half of a runs.sh fingerprint
-# (`ps -o lstart=` is five whitespace-separated fields: "Tue Aug 25 17:16:01
-# 2026"). This is the ONLY part of a process's identity that survives an
-# `exec`, and baton's login path deliberately execs `claude` while still
-# holding the lock. Two processes can share a pid over time; they cannot
-# share a pid AND a start time, so pid+birth is the identity that decides
-# reuse, while the full fingerprint stays on the record for forensics.
-_lock_birth() {
-  local f="${1-}" restore=no
-  case "$-" in *f*) : ;; *) restore=yes ;; esac
-  set -f
-  set -- $f
-  [ "$restore" = yes ] && set +f
-  [ $# -ge 5 ] || return 0
-  printf '%s %s %s %s %s' "$1" "$2" "$3" "$4" "$5"
-}
+# The start-time half of a fingerprint lives in runs.sh as `runs_birth`, not
+# here. It is the identity that survives an `exec` -- which baton's login path
+# does deliberately, replacing itself with `claude` while still holding the
+# lock -- and it is what `runs_alive` already uses to decide whether a live pid
+# is still the recorded process. One rule, one place.
 
 # _lock_write_owner SUBJECT PID FINGERPRINT [RELEASED] -- the owner record,
 # written atomically. Every write mints a fresh token, so every ownership
@@ -136,7 +125,7 @@ _lock_write_owner() {
   _runs_write "$d/owner" \
 "subject=$key
 pid=$pid
-birth=$(_lock_birth "$fp")
+birth=$(runs_birth "$fp")
 fingerprint=$fp
 token=$(_lock_key "$pid-$nonce")
 released=$released
@@ -209,18 +198,14 @@ lock_probe() {
     yes)     LOCK_STATE=held; return 1 ;;
   esac
 
-  # runs_alive says "not our process". Two very different reasons, and they
-  # differ in what a caller may do next, so they are not collapsed.
+  # runs_alive says "not our process", and it has already accounted for the
+  # owner having exec'd (same pid, same start time). Two very different
+  # remaining reasons, and they differ in what a caller may do next, so they
+  # are not collapsed into one "stale".
   got="$(runs_fingerprint "$LOCK_HOLDER_PID")"
   if [ -z "$got" ]; then
     LOCK_STATE=stale-dead
     return 0
-  fi
-  if [ -n "$LOCK_HOLDER_BIRTH" ] && [ "$(_lock_birth "$got")" = "$LOCK_HOLDER_BIRTH" ]; then
-    # Same pid, same start time, different command line: this IS the owner,
-    # it just exec'd (baton's login path execs `claude` under its own pid).
-    LOCK_STATE=held
-    return 1
   fi
   LOCK_STATE=stale-foreign
   return 0

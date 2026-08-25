@@ -42,8 +42,31 @@ runs_fingerprint() {
   ps -p "$pid" -o lstart=,args= 2>/dev/null | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//'
 }
 
+# runs_birth FINGERPRINT -- the start-time half of a fingerprint. `ps -o
+# lstart=` is five whitespace-separated fields ("Tue Aug 25 17:16:01 2026"),
+# and the rest of the fingerprint is the command line.
+#
+# This is the part of a process's identity that survives an `exec`, and it is
+# the part that actually defeats pid reuse: two processes can share a pid over
+# time but not a pid AND a start time. Prints nothing when the fingerprint is
+# too short to carry one, which is how a truncated or planted record stays
+# unmatchable rather than matching everything.
+runs_birth() {
+  local f="${1-}" restore=no
+  case "$-" in *f*) : ;; *) restore=yes ;; esac
+  # The command-line half is arbitrary user text and can contain a glob, so
+  # field-splitting it without disabling pathname expansion would let a
+  # recorded `*` become a directory listing.
+  set -f
+  set -- $f
+  [ "$restore" = yes ] && set +f
+  [ $# -ge 5 ] || return 0
+  printf '%s %s %s %s %s' "$1" "$2" "$3" "$4" "$5"
+}
+
 # runs_alive PID FINGERPRINT -> yes | no | unknown
-#   yes      a live process matches BOTH the pid and the recorded fingerprint
+#   yes      a live process IS the recorded one: same pid, and either the same
+#            command line or the same start time (it exec'd)
 #   no       CONFIRMED gone, or a stranger has since taken the pid
 #   unknown  the question could not be asked
 runs_alive() {
@@ -62,6 +85,26 @@ runs_alive() {
     # ps works (control passed) and has nothing for this pid: reaped.
     printf 'no\n'
   elif [ "$got" = "$want" ]; then
+    printf 'yes\n'
+  elif [ -n "$(runs_birth "$want")" ] && [ "$(runs_birth "$got")" = "$(runs_birth "$want")" ]; then
+    # Same pid, same START TIME, different command line: this IS the recorded
+    # process. It exec'd.
+    #
+    # That is not a corner case here, it is the normal path. run_watched
+    # launches `env -u CLAUDE_CONFIG_DIR claude ...` and records the
+    # fingerprint the instant the pid exists, which RACES the child's own
+    # exec: sometimes the recorded argv is `env -u ... claude` and sometimes
+    # it is already the CLI. Measured 2026-08-25: 1 in 8 samples of that exact
+    # shape caught the pre-exec image, and under the full QA workflow a live
+    # orphan read as dead in 3 of 6 runs.
+    #
+    # Comparing the full command line therefore reported a living child as
+    # gone, which is the worst direction for this probe to be wrong in:
+    # `dead-partial` maps to action `reconcile`, so the wrong bucket pointed
+    # straight at re-dispatching work that was still running -- the exact
+    # duplicate receipts exist to prevent. Start time is both exec-stable and
+    # the thing that actually discriminates a reused pid, so it is what
+    # decides identity; the command line stays on the receipt for forensics.
     printf 'yes\n'
   else
     # Same number, different process. This is the pid-reuse case, and it is

@@ -32,6 +32,40 @@ check_alive "self-matching-fingerprint" "$$" "$SELF_FP" yes
 # these apart, which is exactly why the fingerprint is recorded at launch.
 check_alive "live-pid-wrong-fingerprint" "$$" "sleep 99999 started-in-1999" no
 
+# THE EXEC CASE (baton#2). Same live pid, same START TIME, a different command
+# line: this is the recorded process after an `exec`, not a stranger. It is the
+# normal path, not a corner case -- run_watched launches `env -u
+# CLAUDE_CONFIG_DIR claude ...` and records the fingerprint the instant the pid
+# exists, racing the child's own exec, so the receipt sometimes holds the
+# pre-exec argv. Reading that as a death reported a LIVE orphan as gone, and
+# `dead-partial` maps to action `reconcile`.
+check_alive "same-birth-after-exec" "$$" "$(runs_birth "$SELF_FP") some other command line" yes
+
+# ...and the guard that makes the row above safe: a different start time is
+# still a different process, however similar the command line looks.
+check_alive "different-birth-same-command" "$$" "Mon Jan  1 00:00:00 1999 ${SELF_FP#* * * * * }" no
+
+# runs_birth itself: a fingerprint too short to carry a start time yields
+# nothing, so a truncated or planted record stays unmatchable rather than
+# matching everything.
+if [ -z "$(runs_birth 'three word thing')" ]; then
+  record_pass "unit:runs_birth:too-short-yields-nothing"
+else
+  record_fail "unit:runs_birth:too-short-yields-nothing" "got [$(runs_birth 'three word thing')]"
+fi
+if [ -z "$(runs_birth '')" ]; then
+  record_pass "unit:runs_birth:empty-yields-nothing"
+else
+  record_fail "unit:runs_birth:empty-yields-nothing" "got [$(runs_birth '')]"
+fi
+# A glob in the command-line half must not be expanded into a directory
+# listing while the fingerprint is being split into fields.
+if [ "$(runs_birth 'Tue Aug 25 17:16:01 2026 sh -c *')" = "Tue Aug 25 17:16:01 2026" ]; then
+  record_pass "unit:runs_birth:glob-in-command-is-not-expanded"
+else
+  record_fail "unit:runs_birth:glob-in-command-is-not-expanded" "got [$(runs_birth 'Tue Aug 25 17:16:01 2026 sh -c *')]"
+fi
+
 # A pid that has exited. Reaped and gone is a CONFIRMED death, the only
 # evidence that lets a unit be re-dispatched safely.
 DEAD_PID="$( (exec sh -c 'echo $$') )"

@@ -704,6 +704,16 @@ STEP_TRANSCRIPT=("sess-morning-after")
 STEP_STDOUT=("half way through the night")
 EOF
 
+# Every other block sets a 0.2s poll so the watcher acts quickly. This block
+# wants the opposite: its subject is a host that died with a child still
+# working, so the watcher must NOT get a poll cycle in during the second it
+# takes to set the scene. At the suite-wide 0.2s the watcher occasionally
+# reached in and SIGTERMed the child before it could become an orphan
+# (measured 1 in 6 runs, diagnosed from the fixture's own signals log), which
+# is a property of the setup, not of anything this block asserts.
+BATON_WATCH_INTERVAL=5
+export BATON_WATCH_INTERVAL
+
 start_night
 f="$(wait_for_transcript a 10)"
 check "the night's session was really running before the host died" $([ -n "$f" ]; echo $?)
@@ -758,17 +768,39 @@ check "the losing terminal was told which pid held the session" $(grep -q "$q15_
 # CONFIRMS the death before the replacement starts. The replacement's first
 # instruction is the probe, so any window in which both were alive is exactly
 # what it would capture.
+#
+# The probe compares IDENTITY, not presence. `ps -p <pid>` answering at all is
+# the bare-pid check lock.sh exists to reject: this block runs last, after
+# fourteen others have spawned hundreds of short-lived processes, so the
+# orphan's number is genuinely likely to be reused within milliseconds of its
+# death -- and it was, which is how this row first went red. A stranger at the
+# same number is not the orphan. Measured: the same probe run in isolation was
+# clean 15 of 15, and only ever failed inside the full workflow.
+Q15_ORPHAN_ARGS="$(ps -p "${Q15_ORPHAN:-0}" -o args= 2>/dev/null | tr -s ' ')"
 check "the orphan from the interrupted night is still alive" \
-  $([ -n "$(ps -p "${Q15_ORPHAN:-0}" -o args= 2>/dev/null)" ]; echo $?)
+  $([ -n "$Q15_ORPHAN_ARGS" ]; echo $?)
+[ -n "$Q15_ORPHAN_ARGS" ] || {
+  echo "  15: no orphan at pid ${Q15_ORPHAN:-none} when the reconcile began." >&2
+  echo "  15:   receipt      = $start_receipt" >&2
+  echo "  15:   signals log  = [$(cat "$(signals_log_of a)" 2>/dev/null)]" >&2
+  echo "  15:   board        = $("$BATON_BIN" --pickup 2>/dev/null | tr -d '\n')" >&2
+}
 "$BATON_BIN" --redispatch "$Q15_UNIT" -- \
   sh -c "ps -p $Q15_ORPHAN -o args= > '$SCRATCH/q15-overlap' 2>/dev/null; echo replaced >> '$SCRATCH/q15-replacements.log'" \
   >/dev/null 2>&1
 q15_redrc=$?
+q15_ov="$(tr -s ' ' < "$SCRATCH/q15-overlap" 2>/dev/null)"
 check "the redispatch exited 0" $([ "$q15_redrc" -eq 0 ]; echo $?)
 check "the replacement ran exactly once" \
   $([ "$(grep -c replaced "$SCRATCH/q15-replacements.log" 2>/dev/null || echo 0)" -eq 1 ]; echo $?)
 check "there was no window in which the orphan and its replacement were both alive" \
-  $([ ! -s "$SCRATCH/q15-overlap" ]; echo $?)
+  $([ "$q15_ov" != "$Q15_ORPHAN_ARGS" ]; echo $?)
+[ "$q15_ov" != "$Q15_ORPHAN_ARGS" ] || {
+  echo "  15: the orphan was STILL ITSELF when the replacement started." >&2
+  echo "  15:   orphan pid   = $Q15_ORPHAN" >&2
+  echo "  15:   orphan args  = [$Q15_ORPHAN_ARGS]" >&2
+  echo "  15:   probe saw    = [$q15_ov]" >&2
+}
 
 unset BATON_LOCK_PROV
 cleanup_root

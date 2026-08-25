@@ -23,6 +23,13 @@ STEP_TRANSCRIPT=("sess-redispatch")
 STEP_STDOUT=("working on it")
 EOF
 
+# The suite-wide 0.2s poll makes the watcher act fast, which every other
+# scenario wants and this one does not: the subject here is a host that died
+# with a child still working, so the watcher must not get a poll cycle in
+# during the second it takes to set that scene. Nothing this scenario asserts
+# depends on the cadence.
+export BATON_WATCH_INTERVAL=5
+
 start_night
 transcript="$(wait_for_transcript a 10)"
 scenario_check "the child launched (transcript exists)" $([ -n "$transcript" ]; echo $?)
@@ -60,8 +67,17 @@ printf '%s' "$board" | grep -q '"status": "orphan-running"' || {
   echo "32: receipt was:" >&2; cat "$start_receipt" >&2
   echo "32: ps said: [$(ps -p "${ORPHAN_PID:-0}" -o lstart=,args= 2>/dev/null | tr -s '[:space:]' ' ')]" >&2
 }
+# The orphan's IDENTITY, captured while it is confirmed alive. Every liveness
+# question below compares against this string rather than asking whether
+# `ps -p <pid>` answers at all -- a bare pid is exactly the check lock.sh
+# exists to reject, because the number is reusable and a stranger who
+# inherited it is not the orphan. (Measured: the equivalent bare-pid probe in
+# qa_failover block 15 went red on pid reuse the first time the full workflow
+# ran it end to end.)
+ORPHAN_ARGS="$(ps -p "${ORPHAN_PID:-0}" -o args= 2>/dev/null | tr -s ' ')"
+orphan_now() { ps -p "${ORPHAN_PID:-0}" -o args= 2>/dev/null | tr -s ' '; }
 scenario_check "precondition: the orphan really is alive right now" \
-  $([ -n "$(ps -p "${ORPHAN_PID:-0}" -o args= 2>/dev/null)" ]; echo $?)
+  $([ -n "$ORPHAN_ARGS" ]; echo $?)
 
 # --- a redispatch that loses the claim kills NOTHING -----------------------
 # Claim ordering matters: kill-then-claim would let a loser destroy the
@@ -81,7 +97,7 @@ scenario_check "the refused redispatch launched no replacement" \
   $([ ! -e "$SCRATCH/replacement.log" ]; echo $?)
 # The one that would be silent and catastrophic: a loser that killed anyway.
 scenario_check "the refused redispatch killed nothing -- the orphan is still alive" \
-  $([ -n "$(ps -p "${ORPHAN_PID:-0}" -o args= 2>/dev/null)" ]; echo $?)
+  $([ "$(orphan_now)" = "$ORPHAN_ARGS" ]; echo $?)
 
 kill -KILL "$HOLDER" 2>/dev/null
 wait "$HOLDER" 2>/dev/null
@@ -101,10 +117,17 @@ scenario_check "the redispatch exited 0" $([ "$redrc" -eq 0 ]; echo $?)
 scenario_check "the replacement ran exactly once" \
   $([ "$(grep -c replacement "$SCRATCH/replacement.log" 2>/dev/null || echo 0)" -eq 1 ]; echo $?)
 # THE assertion this scenario exists for.
+overlap_saw="$(tr -s ' ' < "$SCRATCH/overlap" 2>/dev/null)"
 scenario_check "no window in which both were alive: the orphan was gone before the replacement's first instruction" \
-  $([ ! -s "$SCRATCH/overlap" ]; echo $?)
+  $([ "$overlap_saw" != "$ORPHAN_ARGS" ]; echo $?)
+[ "$overlap_saw" != "$ORPHAN_ARGS" ] || {
+  echo "32: the orphan was still itself when the replacement started" >&2
+  echo "32:   orphan pid  = $ORPHAN_PID" >&2
+  echo "32:   orphan args = [$ORPHAN_ARGS]" >&2
+  echo "32:   probe saw   = [$overlap_saw]" >&2
+}
 scenario_check "the orphan is confirmed gone afterwards too" \
-  $([ -z "$(ps -p "${ORPHAN_PID:-0}" -o args= 2>/dev/null)" ]; echo $?)
+  $([ "$(orphan_now)" != "$ORPHAN_ARGS" ]; echo $?)
 
 # The board moves off orphan-running once the orphan really is dead, which is
 # the independent confirmation that the kill was real rather than reported.
