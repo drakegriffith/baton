@@ -31,7 +31,7 @@ while you are looking elsewhere -- the multiplication that caused the
 incident is absent. The rule is about unprompted output, not about every
 `/login` string in the program.
 
-Instructions are deliberately **not** printed to stdout or stderr. Under `--night`
+Instructions are deliberately **never printed unsolicited** to stdout or stderr. Under `--night`
 the watcher and its `claude` child share one terminal, so a printed command
 lands in the terminal you are working in -- and when several accounts fail
 at once, several runnable commands appear at once. That is how a session got
