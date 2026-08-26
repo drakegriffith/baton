@@ -4,7 +4,8 @@
 # detect (classify_text, via probe() and mark_dead_for_class); never the
 # reverse. Exposes the public surface `watch` is allowed to call: ranked(),
 # is_dead(), mark_dead(), mark_dead_for_class(), probe(), pick_live(),
-# set_envargs(), bump(), die_no_live_account(), is_uint(), is_unum(),
+# set_envargs(), bump(), die_no_live_account(), die_night_stopped(),
+# is_uint(), is_unum(),
 # is_account(), enumerate_accounts(), candidates_exist(), handoff_log(),
 # handoff_log_quoted(). The last two are listed because watch.sh calls them
 # and the list is the contract: night_mode records what it is about to try
@@ -31,6 +32,7 @@ DEADDIR="$ROOT/.dead"
 ALIVEDIR="$ROOT/.alive"
 PROBECWD="$ROOT/.probe"
 HANDOFF_LOG="$ROOT/.handoff.log"
+BATON_NIGHT_STOP_EXIT=75
 ALIVE_TTL=900
 PROBE_TIMEOUT=90
 DEFAULT_DEAD=5h
@@ -54,8 +56,9 @@ DEFAULT_DEAD=5h
 # the stream it went to was the operator's hands.
 #
 # The rule this establishes: anything a human could select and press enter on
-# goes to the handoff log and NOWHERE else. A shared stream may say that
-# something happened, and where to read about it, but never what to type.
+# goes to the handoff log and NOWHERE else. When --night stops for good
+# (cap reached, every account dead), die_night_stopped writes the runnable
+# resume line HERE and tells stderr, in words, where to find it.
 #
 # handoff_log MSG -- append one timestamped line to the handoff log.
 #
@@ -524,8 +527,54 @@ launch() {
 # the knob, never the line. The exact commands go to the log, which is the
 # one channel allowed to carry them.
 die_no_live_account() {
-  handoff_log "no live account under $ROOT. To see the dead marks, run:  baton --status   To override one dead mark, run:  baton --revive <name>"
-  die "no live account under $ROOT (BATON_ACCOUNTS_ROOT): every account is dead-marked or excluded. Check account status, and revive an account with the --revive flag if you know one is back. The exact commands are in $HANDOFF_LOG"
+  local reason="no live account under $ROOT (BATON_ACCOUNTS_ROOT): every account is dead-marked or excluded. Check account status, and revive an account with the --revive flag if you know one is back."
+  local commands="To see the dead marks, run:  baton --status   To override one dead mark, run:  baton --revive <name>"
+  # Two arguments mean the caller is --night, including two explicit empty
+  # strings when no child ever launched. Plain auto-pick keeps its historical
+  # exit 1 and does not pretend it stopped a resumable child.
+  if [ "$#" -ge 2 ]; then
+    die_night_stopped "$reason" "$1" "$2" "$commands"
+  fi
+  handoff_log "no live account under $ROOT. $commands"
+  die "$reason The exact commands are in $HANDOFF_LOG"
+}
+
+# die_night_stopped REASON LAST_ACCOUNT SESSION_ID [LOG_EXTRA] -- terminate
+# --night after its watched child has already stopped. stderr gets the
+# reason, the last account, the session id (or the words that it is unknown)
+# and the handoff log path. The log gets the same plus the one runnable
+# resume line. Runnable commands stay on the single channel the handoff log
+# exists for, so a window that closes on this message loses nothing the log
+# does not hold, and no stream ever carries a pasteable command. The line is
+# rendered only when the account is known and the id is in the transcript-
+# basename charset; otherwise the log says in words why it is withheld
+# (verify-cap 2026-08-26: an unquoted "sess with spaces" or "-rf danger"
+# rendered a non-runnable command presented as runnable). Exit 75 marks
+# baton's own stop decision; a child exiting 75 passes through as 75 too, so
+# the pointer text, not the number, is what says the stop was baton's.
+die_night_stopped() {
+  local reason="$1" last_account="$2" session_id="$3" log_extra="${4:-}" where resume
+  if [ -n "$last_account" ]; then
+    where="last account '$last_account'"
+  else
+    where="last account unknown (no child was launched)"
+  fi
+  if [ -z "$session_id" ]; then
+    where="$where; session id unknown (no resumable transcript was captured)"
+    resume="resume line unavailable because the session id is unknown"
+  elif ! printf '%s' "$session_id" | grep -Eq '^[A-Za-z0-9_-]+$'; then
+    where="$where; session id '$session_id' contains characters outside [A-Za-z0-9_-]"
+    resume="resume line withheld (unsafe session id); pass the id to --resume by hand"
+  elif [ -z "$last_account" ]; then
+    where="$where; session id '$session_id'"
+    resume="resume line withheld because the account is unknown"
+  else
+    where="$where; session id '$session_id'"
+    resume="resume line: baton $last_account --resume $session_id"
+  fi
+  handoff_log "$reason; $where; $resume; handoff log: $HANDOFF_LOG${log_extra:+; $log_extra}"
+  warn "$reason; $where; the resume line is in the handoff log: $HANDOFF_LOG"
+  exit "$BATON_NIGHT_STOP_EXIT"
 }
 
 auto_launch() { # $1 = "probe"|"fast", rest = claude args

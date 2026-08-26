@@ -41,9 +41,23 @@ else
   stop_night
 fi
 scenario_check "exit nonzero" $([ "$NIGHT_EXIT" -ne 0 ]; echo $?)
+scenario_check "exhaustion stop uses baton's reserved exit 75" $([ "$NIGHT_EXIT" -eq 75 ]; echo $?)
 scenario_check "stderr reports no live account" $(grep -q "no live account" "$SCRATCH/night.err"; echo $?)
 scenario_check "stderr does NOT blame the handoff cap" \
   $(! grep -q "handoff cap" "$SCRATCH/night.err"; echo $?)
+handoff_log_path="$BATON_ACCOUNTS_ROOT/.handoff.log"
+stderr_subjects=$(grep -c . "$SCRATCH/night.err" 2>/dev/null)
+log_subjects=$(grep -c . "$handoff_log_path" 2>/dev/null)
+scenario_check "unknown-session check inspected stderr subjects (got $stderr_subjects)" \
+  $([ "$stderr_subjects" -gt 0 ]; echo $?)
+scenario_check "unknown-session check inspected handoff-log subjects (got $log_subjects)" \
+  $([ "$log_subjects" -gt 0 ]; echo $?)
+stderr_unknown=$(grep -c "last account 'b'.*session id unknown.*$handoff_log_path" "$SCRATCH/night.err" 2>/dev/null)
+log_unknown=$(grep -c "last account 'b'.*session id unknown.*$handoff_log_path" "$handoff_log_path" 2>/dev/null)
+scenario_check "stderr explicitly reports the unknown session id (got $stderr_unknown)" \
+  $([ "$stderr_unknown" -gt 0 ]; echo $?)
+scenario_check "handoff log explicitly reports the unknown session id (got $log_unknown)" \
+  $([ "$log_unknown" -gt 0 ]; echo $?)
 # The run really did reach the terminal rotation (rather than dying early for
 # some other reason): the one permitted handoff happened first.
 scenario_check "the permitted handoff to b did happen" $([ "$(invocation_count b)" -ge 1 ]; echo $?)
