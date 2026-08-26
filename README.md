@@ -237,3 +237,7 @@ no outcome falls through silently. Exact remaining-percentage ranking across
 accounts would require reading each account's OAuth token; baton never
 touches credentials, so it asks the CLI instead and pays a few tokens per
 probe. Full rationale lives in the script headers.
+
+## License
+
+MIT, see LICENSE.
