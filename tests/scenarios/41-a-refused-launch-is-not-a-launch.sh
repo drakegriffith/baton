@@ -39,11 +39,11 @@ HANDOFF_LOG_PATH="$BATON_ACCOUNTS_ROOT/.handoff.log"
 "$BATON_BIN" --claim "session:$SID" -- sleep 30 >/dev/null 2>&1 &
 HOLDER=$!
 waited=0
-while [ ! -e "$BATON_ACCOUNTS_ROOT/.locks/session_$SID.lock/owner" ]; do
+while [ ! -e "$(baton_lock_dir)/session_$SID.lock/owner" ]; do
   sleep 0.1; waited=$((waited + 1)); [ "$waited" -gt 100 ] && break
 done
 scenario_check "positive control: the contested session lock is held before --night starts" \
-  $([ -e "$BATON_ACCOUNTS_ROOT/.locks/session_$SID.lock/owner" ]; echo $?)
+  $([ -e "$(baton_lock_dir)/session_$SID.lock/owner" ]; echo $?)
 
 # a launches, writes the contested transcript, then hits its limit and
 # rotates. b is where the refusal happens.
