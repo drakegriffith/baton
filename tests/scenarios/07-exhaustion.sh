@@ -7,18 +7,29 @@ scenario_begin "07-exhaustion"
 fresh_root
 
 write_behavior a <<'EOF'
-STEP_EXIT=(1 1)
-STEP_STDOUT=("usage limit reached" "usage limit reached")
+STEP_TRANSCRIPT=("sess-exhaust-a")
+STEP_BLOCK=(1)
+STEP_BLOCK_EXIT=(143)
 EOF
 write_behavior b <<'EOF'
-STEP_EXIT=(1 1)
-STEP_STDOUT=("usage limit reached" "usage limit reached")
+STEP_TRANSCRIPT=("sess-exhaust-b")
+STEP_BLOCK=(1)
+STEP_BLOCK_EXIT=(143)
 EOF
 
 start_night
+a_transcript=$(wait_for_transcript a 5)
+scenario_check "a transcript appeared" $([ -n "$a_transcript" ]; echo $?)
+[ -n "$a_transcript" ] && printf '%s\n' "usage limit reached" >> "$a_transcript"
+
+b_transcript=$(wait_for_transcript b 5)
+scenario_check "b transcript appeared" $([ -n "$b_transcript" ]; echo $?)
+[ -n "$b_transcript" ] && printf '%s\n' "usage limit reached" >> "$b_transcript"
+
 wait_for_night_exit 10
 scenario_check "night process exited" $?
 scenario_check "exit nonzero" $([ "$NIGHT_EXIT" -ne 0 ]; echo $?)
+scenario_check "exhaustion stop uses baton's reserved exit 75" $([ "$NIGHT_EXIT" -eq 75 ]; echo $?)
 scenario_check "existing no-live-account message on stderr" $(grep -q "no live account under " "$SCRATCH/night.err"; echo $?)
 # This row used to pin the message's exact tail: "baton --status to see dead
 # marks; baton --revive <name> to override". That is two runnable command
@@ -45,6 +56,25 @@ scenario_check "the exact recovery commands are in the handoff log instead" \
 # accounts". Both halves are asserted so neither can be dropped.
 scenario_check "message names the resolved accounts root" $(grep -qF "$BATON_ACCOUNTS_ROOT" "$SCRATCH/night.err"; echo $?)
 scenario_check "message names the BATON_ACCOUNTS_ROOT knob" $(grep -q "BATON_ACCOUNTS_ROOT" "$SCRATCH/night.err"; echo $?)
+handoff_log_path="$BATON_ACCOUNTS_ROOT/.handoff.log"
+stderr_subjects=$(grep -c . "$SCRATCH/night.err" 2>/dev/null)
+log_subjects=$(grep -c . "$handoff_log_path" 2>/dev/null)
+scenario_check "resume check inspected stderr subjects (got $stderr_subjects)" \
+  $([ "$stderr_subjects" -gt 0 ]; echo $?)
+scenario_check "resume check inspected handoff-log subjects (got $log_subjects)" \
+  $([ "$log_subjects" -gt 0 ]; echo $?)
+stderr_resume=$(grep -cF "baton b --resume sess-exhaust-b" "$SCRATCH/night.err" 2>/dev/null)
+log_resume=$(grep -cF "baton b --resume sess-exhaust-b" "$handoff_log_path" 2>/dev/null)
+scenario_check "stderr carries NO runnable resume line (got $stderr_resume)" \
+  $([ "$stderr_resume" -eq 0 ]; echo $?)
+scenario_check "stderr says the resume line is in the handoff log" \
+  $(grep -qF "the resume line is in the handoff log: $handoff_log_path" "$SCRATCH/night.err"; echo $?)
+scenario_check "handoff log carries the exact resume line (got $log_resume)" \
+  $([ "$log_resume" -gt 0 ]; echo $?)
+scenario_check "stderr names the last account, session id, and handoff log path" \
+  $(grep -q "last account 'b'.*session id 'sess-exhaust-b'.*$handoff_log_path" "$SCRATCH/night.err"; echo $?)
+scenario_check "handoff log names the last account, session id, and its own path" \
+  $(grep -q "last account 'b'.*session id 'sess-exhaust-b'.*$handoff_log_path" "$handoff_log_path"; echo $?)
 scenario_check "a marked dead with future epoch" $(is_dead_marked a && [ "$(dead_epoch_of a)" -gt "$(date +%s)" ]; echo $?)
 scenario_check "b marked dead with future epoch" $(is_dead_marked b && [ "$(dead_epoch_of b)" -gt "$(date +%s)" ]; echo $?)
 

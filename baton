@@ -69,7 +69,13 @@
 #   baton --night [claude args...]  unattended mode: auto-pick like plain
 #                               baton, but watch the live transcript for a
 #                               limit/auth hit and hand off to the next
-#                               account instead of stopping. See
+#                               account instead of stopping. Baton's own
+#                               cap/exhaustion stop exits 75, names the
+#                               session and the handoff log on stderr, and
+#                               writes the runnable resume line to that
+#                               log; a child's own exit code passes through
+#                               unchanged, so the pointer text, not the
+#                               number, says the stop was baton's. See
 #                               features/failover.feature for the full spec.
 #
 # State lives in ~/.claude-accounts: .tally, .last, .dead/<name>

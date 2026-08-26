@@ -3,7 +3,7 @@
 # (classify_text, for both the live-transcript and post-exit-probe paths)
 # and on accounts' public surface only (pick_live/candidates_exist,
 # mark_dead_for_class, probe, set_envargs, bump, die_no_live_account,
-# handoff_log, is_uint/is_unum) -- never on accounts'
+# die_night_stopped, handoff_log, is_uint/is_unum) -- never on accounts'
 # private state files directly, and never a second copy of the LIMIT/AUTH
 # regex family.
 #
@@ -12,7 +12,9 @@
 # the watcher and a full-screen TUI share one terminal for the whole night.
 # Anything printed here is therefore printed into a terminal a human is
 # using. Nothing in this file may write a runnable command to a stream; the
-# durable record goes through accounts.sh's handoff_log().
+# durable record goes through accounts.sh's handoff_log(). That includes the
+# final stop after a killed child: die_night_stopped puts the resume line in
+# the log and names the log path on stderr.
 #
 # Forbidden dependency (see QA-DOC section 4 rule 4 and the dependency
 # scenario in tests/scenarios): watch's only filesystem reads are transcript
@@ -448,7 +450,7 @@ night_mode() {
   night_knobs
   max_handoffs="$NIGHT_MAX_HANDOFFS"
 
-  pick_live probe || die_no_live_account
+  pick_live probe || die_no_live_account "" ""
   acct="$PICKED"
 
   while true; do
@@ -475,11 +477,13 @@ night_mode() {
         # change nothing. candidates_exist() answers from dead marks only --
         # it never probes, so the account the cap is about to refuse stays
         # untouched (failover.feature's cap scenario).
-        candidates_exist || die_no_live_account
+        candidates_exist || die_no_live_account "$acct" "$NIGHT_SESSION_ID"
         if [ $((handoffs + 1)) -gt "$max_handoffs" ]; then
-          die "handoff cap ($max_handoffs) reached; raise it with BATON_MAX_HANDOFFS"
+          die_night_stopped \
+            "handoff cap ($max_handoffs) reached; raise it with BATON_MAX_HANDOFFS" \
+            "$acct" "$NIGHT_SESSION_ID"
         fi
-        pick_live probe || die_no_live_account
+        pick_live probe || die_no_live_account "$acct" "$NIGHT_SESSION_ID"
         prev="$acct"
         acct="$PICKED"
         handoffs=$((handoffs + 1))
