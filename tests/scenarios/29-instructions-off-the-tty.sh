@@ -147,17 +147,62 @@ for tag in night plain; do
     $([ "$leaked" -eq 0 ]; echo $?)
 done
 
-# --- claim 2: no runnable command line on stdout or stderr -----------------
-# "Runnable" here means specifically: a complete command that would ATTACH A
-# PROCESS TO A SESSION -- `baton <account>` with the name already filled in.
-# Two deliberate non-targets, so a future reader knows they were weighed
-# rather than missed: `baton --revive <name>` carries a placeholder and
-# cannot be run as-is, and `baton --status` is read-only, so running it twice
-# costs nothing. Neither can clobber session state. `baton a` can, and did.
+# --- claim 2: no runnable command line on stdout, stderr, or the terminal --
+#
+# This claim used to be spelled 'run: baton |baton [A-Za-z0-9_-]+ +then
+# /login' -- the ONE sentence pick_live's AUTH branch printed. Measured
+# against the three leak shapes that have actually mattered, it caught 1 of
+# 3: it recognised "run:  baton a   then /login" but not `baton a --resume
+# abc123` (the literal shape the 2026-08-25 incident put in Drake's
+# terminal, which reached stderr through the UNKNOWN branch's verbatim probe
+# relay) and not `baton --revive b`. A test named "no runnable command
+# reaches the tty" that knows only one sentence is not testing its own name;
+# it is pinning a string.
+#
+# The predicate now lives once, in tests/fixtures/lib.sh
+# (RUNNABLE_BATON_RE + runnable_command_lines), whitespace-normalised
+# because "baton   a" pastes exactly as well as "baton a". The two former
+# "deliberate non-targets" are now targets, and that inversion is a decision,
+# not drift: `baton --revive <name>` was excused as carrying a placeholder,
+# but `baton --revive b` with the name filled in is what die_no_live_account
+# actually printed; and `baton --status` was excused as read-only, which is
+# an argument about consequences, not about whether an unbidden command line
+# appeared in a terminal. Root cause 2 is the second thing.
+#
+# It is applied to all three captures per entry point -- stdout, stderr, and
+# the pty typescript (the controlling terminal itself) -- so a future change
+# that moves a leak from one stream to another cannot slip past.
+pty_noise_stripped "$SCRATCH/night.pty" > "$SCRATCH/night.tty" 2>/dev/null || true
+pty_noise_stripped "$SCRATCH/plain.pty" > "$SCRATCH/plain.tty" 2>/dev/null || true
+
+# Positive control: the predicate can see a leak at all. Without this, every
+# assertion in this section passes for a predicate that matches nothing.
+control_hits=$(predicate_positive_control "$SCRATCH/predicate-control.txt")
+scenario_check "positive control: the predicate matches all 3 known leak shapes (got $control_hits)" \
+  $([ "$control_hits" -eq 3 ]; echo $?)
+
+# Silence is not evidence, applied to the PREDICATE and not only to baton: a
+# "no runnable command" result over zero lines found nothing because it read
+# nothing. The number of lines the predicate was actually applied to is
+# asserted before any of its negatives are believed.
+predicate_scanned=0
 for tag in night plain; do
-  for stream in out err; do
-    runnable=$(count_matching 'run: baton |baton [A-Za-z0-9_-]+ +then /login' "$SCRATCH/$tag.$stream")
-    scenario_check "$tag.$stream: no runnable relaunch/login command (got $runnable)" \
+  for stream in out err tty; do
+    predicate_scanned=$((predicate_scanned + $(stream_lines "$SCRATCH/$tag.$stream")))
+  done
+done
+if [ "$predicate_scanned" -eq 0 ]; then
+  echo "29-instructions-off-the-tty: COULD NOT INSPECT -- the runnable-command predicate read 0 lines" >&2
+  cleanup_root
+  exit 2
+fi
+scenario_check "the runnable-command predicate read more than zero lines (got $predicate_scanned)" \
+  $([ "$predicate_scanned" -gt 0 ]; echo $?)
+
+for tag in night plain; do
+  for stream in out err tty; do
+    runnable=$(runnable_command_lines "$SCRATCH/$tag.$stream")
+    scenario_check "$tag.$stream: no runnable baton command line (got $runnable)" \
       $([ "$runnable" -eq 0 ]; echo $?)
   done
 done
@@ -221,9 +266,16 @@ notice=$(count_matching 'could not be written' "$SCRATCH/broken.err")
 scenario_check "operator is told once that instructions were not recorded (got $notice)" \
   $([ "$notice" -eq 1 ]; echo $?)
 
-noticecmd=$(count_matching 'run: baton |baton [A-Za-z0-9_-]+ +then /login' "$SCRATCH/broken.err")
-scenario_check "the unwritable-log notice is itself not pasteable (got $noticecmd)" \
+# The same broadened predicate, on the run where the durable channel is
+# GONE. This is the case most likely to tempt a future maintainer into
+# printing the instruction after all ("the log is broken, so where else
+# would it go?"), which is why it is asserted separately from claim 2 rather
+# than folded into it.
+noticecmd=$(runnable_command_lines "$SCRATCH/broken.err")
+scenario_check "the unwritable-log run is itself not pasteable (got $noticecmd)" \
   $([ "$noticecmd" -eq 0 ]; echo $?)
+scenario_check "the unwritable-log run's stderr was more than zero lines (got $broken_subjects)" \
+  $([ "$broken_subjects" -gt 0 ]; echo $?)
 
 cleanup_root
 scenario_end

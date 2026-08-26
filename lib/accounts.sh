@@ -351,8 +351,18 @@ launch() {
 # really is exhausted" and with "BATON_ACCOUNTS_ROOT pointed at an empty
 # temp dir and baton never saw your accounts at all". failover.feature's
 # exhaustion scenario requires the message name BATON_ACCOUNTS_ROOT.
+#
+# It names the two recovery moves as NOUNS and one as a FLAG, never as two
+# pasteable command lines. It used to end "baton --status to see dead marks;
+# baton --revive <name> to override", which is two runnable commands on
+# stderr -- the last command-shaped output left outside the documented
+# `--add` exception, and reached on exactly the path the 2026-08-25 cascade
+# ended on. The same rule lock.sh's refusal message already follows: name
+# the knob, never the line. The exact commands go to the log, which is the
+# one channel allowed to carry them.
 die_no_live_account() {
-  die "no live account under $ROOT (BATON_ACCOUNTS_ROOT). baton --status to see dead marks; baton --revive <name> to override"
+  handoff_log "no live account under $ROOT. To see the dead marks, run:  baton --status   To override one dead mark, run:  baton --revive <name>"
+  die "no live account under $ROOT (BATON_ACCOUNTS_ROOT): every account is dead-marked or excluded. Check account status, and revive an account with the --revive flag if you know one is back. The exact commands are in $HANDOFF_LOG"
 }
 
 auto_launch() { # $1 = "probe"|"fast", rest = claude args
