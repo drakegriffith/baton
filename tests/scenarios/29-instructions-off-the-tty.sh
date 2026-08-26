@@ -266,6 +266,21 @@ notice=$(count_matching 'could not be written' "$SCRATCH/broken.err")
 scenario_check "operator is told once that instructions were not recorded (got $notice)" \
   $([ "$notice" -eq 1 ]; echo $?)
 
+# The WORDING, not just the fact. This row used to match only "could not be
+# written", which the old overclaiming notice ("this run's instructions were
+# NOT recorded anywhere. Fix that path to get them back") also contained --
+# so the test that is supposed to pin the corrected message would have passed
+# the message it was correcting. A claim about wording has to assert the
+# words that carry the claim: that ONE line is lost, and that later lines may
+# still land. Both halves, so neither can be dropped.
+scenario_check "the notice scopes the loss to this one line (got $(count_matching 'this one line is lost' "$SCRATCH/broken.err"))" \
+  $([ "$(count_matching 'this one line is lost' "$SCRATCH/broken.err")" -eq 1 ]; echo $?)
+scenario_check "the notice says later lines may still land (got $(count_matching 'Later lines may still land' "$SCRATCH/broken.err"))" \
+  $([ "$(count_matching 'Later lines may still land' "$SCRATCH/broken.err")" -eq 1 ]; echo $?)
+# And the retired overclaim never comes back.
+scenario_check "the notice no longer claims nothing was recorded anywhere" \
+  $([ "$(count_matching 'NOT recorded anywhere|to get them back' "$SCRATCH/broken.err")" -eq 0 ]; echo $?)
+
 # The same broadened predicate, on the run where the durable channel is
 # GONE. This is the case most likely to tempt a future maintainer into
 # printing the instruction after all ("the log is broken, so where else
