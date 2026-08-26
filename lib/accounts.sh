@@ -143,33 +143,73 @@ _handoff_log_usable() {
 
 # _handoff_log_ident -- the path's identity as LSTAT sees it (device:inode),
 # empty when it cannot be read. BSD `stat` does not follow symlinks without
-# -L, which is exactly the semantics needed here: a link swapped in must read
-# as a different file, not as its target.
+# -L, which is the semantics needed: a link must read as itself, not as its
+# target. The value is handed to _handoff_append, which re-checks it against
+# the file it actually opened.
 _handoff_log_ident() { stat -f '%d:%i' "$HANDOFF_LOG" 2>/dev/null; }
 
-# _handoff_log_same_file BEFORE -- true when the path still names the file it
-# named at BEFORE, and that file is still a regular non-symlink.
+# _handoff_append IDENT LINE -- append one line to $HANDOFF_LOG, or refuse.
+#   0  written
+#   3  refused: the path is not the regular file that was checked
+#   2  could not open it at all
 #
-# DETECT, NOT PREVENT, and that distinction is the whole reason this exists.
-# _handoff_log_usable checks the path and `>>` then opens it; those are two
-# syscalls with a window between them, and a symlink dropped into that window
-# is followed no matter how carefully the check was written. The real fix is
-# to open with O_NOFOLLOW, and BASH CANNOT DO THAT -- no redirection
-# operator, no `exec` flag, no builtin opens without following. So the window
-# stays open and is closed after the fact instead: once the line has been
-# written, ask whether the path still names the same file. If it does not,
-# the line went somewhere baton never checked, and that is reported rather
-# than assumed benign.
+# WHY THIS IS PYTHON AND NOT `>>`. Every bash spelling of this has the same
+# hole: the check and the open are two syscalls, and whatever is dropped into
+# the gap between them is what gets written to. The previous round narrowed
+# the gap by re-checking the path AFTER the append -- which a
+# swap-append-restore sequence walks straight through, because by the time
+# the second check runs the path looks exactly as it did before. Narrowing a
+# race is not closing one.
 #
-# An empty BEFORE means the identity was never read, and that answers 1, not
-# 0: a check that inspected nothing must not report clean.
-_handoff_log_same_file() {
-  local before="${1-}" now
-  [ -n "$before" ] || return 1
-  [ -L "$HANDOFF_LOG" ] && return 1
-  [ -f "$HANDOFF_LOG" ] || return 1
-  now=$(_handoff_log_ident)
-  [ -n "$now" ] && [ "$now" = "$before" ]
+# O_NOFOLLOW closes it, by moving the decision INTO the open: the kernel
+# refuses to traverse a final-component symlink, so there is no longer a
+# moment between deciding and writing. Bash cannot ask for that flag -- no
+# redirection operator, no `exec` flag, no builtin -- and python3 is already
+# a declared dependency (README "Requires", and detect.sh's
+# parse_reset_epoch has always used it). fstat on the returned descriptor
+# then confirms the file that was actually opened is regular and is the same
+# inode the pre-check looked at, so a swap to a different regular file is
+# refused too.
+#
+# O_NONBLOCK is there for FIFOs specifically: opening one for write with no
+# reader blocks forever, and this call sits in the watcher's failover path.
+# The flag turns that hang into ENXIO. The bash pre-check already rejects
+# FIFOs; this is the copy that still holds when the FIFO arrives during the
+# race window.
+#
+# Cost, accepted deliberately: one python3 process per logged line, roughly
+# 30-50ms. A night writes a handful of lines, so this buys a closed race for
+# a latency nobody is waiting on. If that ever stops being true the answer is
+# a single long-lived writer, not a return to `>>`.
+#
+# stderr is discarded because a traceback on a shared stream is exactly what
+# this whole file exists to prevent; the exit code carries the outcome.
+_handoff_append() {
+  BATON_HL_PATH="$HANDOFF_LOG" BATON_HL_IDENT="${1-}" BATON_HL_LINE="${2-}" python3 -c '
+import errno, os, stat, sys
+path = os.environ["BATON_HL_PATH"]
+want = os.environ["BATON_HL_IDENT"]
+line = os.environ["BATON_HL_LINE"]
+try:
+    fd = os.open(path,
+                 os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
+                 0o600)
+except OSError as e:
+    # ELOOP: a symlink, refused by O_NOFOLLOW. ENXIO: a FIFO with no reader,
+    # which O_NONBLOCK turned from a hang into an error. Both are "this is
+    # not the file baton agreed to write to", not "the disk is full".
+    sys.exit(3 if e.errno in (errno.ELOOP, errno.ENXIO) else 2)
+try:
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode):
+        sys.exit(3)
+    if want and want != "%d:%d" % (st.st_dev, st.st_ino):
+        sys.exit(3)
+    os.write(fd, (line + "\n").encode("utf-8", "replace"))
+finally:
+    os.close(fd)
+sys.exit(0)
+' 2>/dev/null
 }
 
 handoff_log() {
@@ -182,13 +222,15 @@ handoff_log() {
   # Creation only -- an existing root's mode belongs to the operator.
   ( umask 077; mkdir -p "$ROOT" ) 2>/dev/null
   HANDOFF_LOG_WHY="that path could not be appended to"
-  local ident_before=""
+  local ident_before rc
   if _handoff_log_usable; then
     ident_before=$(_handoff_log_ident)
-    if { printf '%s baton: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$HANDOFF_LOG"; } 2>/dev/null; then
-      _handoff_log_same_file "$ident_before" && return 0
-      HANDOFF_LOG_WHY="that path stopped naming the same file while the line was being written, so it went somewhere unchecked"
-    fi
+    _handoff_append "$ident_before" "$(date '+%Y-%m-%d %H:%M:%S') baton: $*"; rc=$?
+    case "$rc" in
+      0) return 0 ;;
+      3) HANDOFF_LOG_WHY="that path is no longer the regular file baton checked, so nothing was written to it" ;;
+      *) HANDOFF_LOG_WHY="that path could not be opened for appending" ;;
+    esac
   fi
   HANDOFF_LOG_BROKEN=1
   echo "baton: WARNING -- this line could not be written to the handoff log $HANDOFF_LOG ($HANDOFF_LOG_WHY), so this one line is lost. Later lines may still land there once that path is fixed. Check account status for the current state. (Shown once.)" >&2

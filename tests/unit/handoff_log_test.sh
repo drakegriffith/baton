@@ -1,23 +1,18 @@
 #!/usr/bin/env bash
-# Unit tests for the handoff log's path guard in lib/accounts.sh.
+# Unit tests for the handoff log's append, in lib/accounts.sh.
 #
 # Sourcing rule (QA-DOC section 1 + the section 6 amendment): a module may be
 # sourced directly when the functions under test depend on no OTHER baton
-# module. These four do -- _handoff_log_ident, _handoff_log_same_file,
-# _handoff_log_usable and handoff_log touch only $HANDOFF_LOG and `stat`.
+# module. These do -- they touch only $HANDOFF_LOG, `stat`, and python3.
 # accounts.sh as a whole depends on detect.sh, but nothing on this path calls
 # classify_text, and sourcing it executes only variable assignments.
 #
-# WHY THESE ARE UNIT ROWS AND NOT A SCENARIO. The swap they guard against is
-# a RACE: a symlink dropped in between _handoff_log_usable's check and the
-# `>>` that opens the path. Bash has no O_NOFOLLOW open, so that window
-# cannot be closed from a shell -- only detected after the fact, by asking
-# whether the path still names the file it named a moment ago. A race cannot
-# be triggered on demand from outside the process, so a black-box scenario
-# could only ever assert the detector's SILENCE, which is the thing
-# absence-is-not-evidence forbids. These rows call the detector with a
-# planted "before" value and require it to FIRE. Without them it is dead code
-# that always answers "fine".
+# WHY UNIT ROWS. The hole these close is a RACE: a symlink dropped in between
+# the bash pre-check and the open. It cannot be triggered on demand from
+# outside the process, so a black-box scenario could only assert the guard's
+# SILENCE -- the thing absence-is-not-evidence forbids. These rows call the
+# appender directly against a hostile path and require it to REFUSE. Without
+# them the guard is code that always answers "fine".
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 UNITROOT="$(cd "$(mktemp -d)" && pwd -P)/accounts"
@@ -26,60 +21,71 @@ export BATON_ACCOUNTS_ROOT="$UNITROOT"
 . "$HERE/../../lib/accounts.sh"
 . "$HERE/../fixtures/lib.sh"
 
-check() { # $1 name, $2 actual exit, $3 expected exit
+check() { # $1 name, $2 actual, $3 expected
   if [ "$2" = "$3" ]; then
     record_pass "unit:handoff_log:$1"
   else
-    record_fail "unit:handoff_log:$1" "expected exit $3 got $2"
+    record_fail "unit:handoff_log:$1" "expected [$3] got [$2]"
   fi
 }
 
-# --- the identity reader ---------------------------------------------------
-: > "$HANDOFF_LOG"
-IDENT_A=$(_handoff_log_ident)
-check "ident-of-a-regular-file-is-readable" $([ -n "$IDENT_A" ]; echo $?) 0
-
-# The unchanged path is the NEGATIVE control: if this row ever fails, every
-# "fired" row below is firing for the wrong reason and the detector is simply
-# broken rather than sensitive.
-_handoff_log_same_file "$IDENT_A"
-check "unchanged-path-is-the-same-file" $? 0
-
-# --- the detector fires: swapped for a symlink -----------------------------
-# The measured shape. The append has already gone through the link by the
-# time this runs; detecting it is what turns silent misdirection into a
-# reported failure.
+# --- the honest path, as the negative control ------------------------------
+# Every refusal row below is only meaningful if the appender WRITES when the
+# path is fine. If this row fails, the guard is not strict, it is broken.
 rm -f "$HANDOFF_LOG"
-ln -s "$UNITROOT/elsewhere.log" "$HANDOFF_LOG"
-_handoff_log_same_file "$IDENT_A"
-check "swapped-for-a-symlink-is-detected" $? 1
+: > "$HANDOFF_LOG"
+IDENT=$(_handoff_log_ident)
+_handoff_append "$IDENT" "hello"; rc=$?
+check "regular-file-append-succeeds" "$rc" 0
+check "regular-file-append-lands" "$(cat "$HANDOFF_LOG")" "hello"
+
+# --- the identity guard: a swapped file is refused -------------------------
+# Same type, same permissions, different file. Only the inode says the line
+# would go somewhere other than the file that was checked.
+rm -f "$HANDOFF_LOG"
+: > "$HANDOFF_LOG"
+_handoff_append "$IDENT" "should not land"; rc=$?
+check "a-different-inode-is-refused" "$rc" 3
+check "and-nothing-was-written" "$(cat "$HANDOFF_LOG")" ""
+
+# --- O_NOFOLLOW: the open itself refuses a symlink -------------------------
+# This is the round-3 fix. The previous guard checked the path, appended, then
+# re-checked -- which a swap-append-restore sequence walks straight through,
+# because the path looks identical by the time the second check runs. Refusing
+# in the OPEN removes the window instead of narrowing it: there is no longer a
+# moment between the decision and the write.
+rm -f "$HANDOFF_LOG"
+TARGET="$UNITROOT/elsewhere.log"
+: > "$TARGET"
+ln -s "$TARGET" "$HANDOFF_LOG"
+_handoff_append "$IDENT" "must not follow"; rc=$?
+check "a-symlink-is-refused-by-the-open" "$rc" 3
+check "and-the-symlink-target-gained-nothing" "$(wc -c < "$TARGET" | tr -d ' ')" 0
 rm -f "$HANDOFF_LOG"
 
-# --- the detector fires: swapped for a DIFFERENT regular file --------------
-# A symlink is not the only swap. Replacing the file with another regular
-# file passes every type check and changes nothing an `-f` test can see; only
-# the inode says the line went somewhere else.
-: > "$HANDOFF_LOG"
-_handoff_log_same_file "$IDENT_A"
-check "swapped-for-another-regular-file-is-detected" $? 1
-
-# --- the detector fires: the path is gone ----------------------------------
+# --- a FIFO must not hang --------------------------------------------------
+# Opening a FIFO for write with no reader blocks forever, and this call sits
+# in the watcher's failover path. O_NONBLOCK turns that hang into ENXIO. The
+# alarm is the assertion: if the guard ever regresses, this row fails by
+# TIMING OUT rather than by hanging the whole suite.
+mkfifo "$HANDOFF_LOG"
+perl -e 'alarm shift; exec @ARGV' 10 bash -c '. "$0"; _handoff_append "x" "y"' "$HERE/../../lib/accounts.sh" >/dev/null 2>&1
+rc=$?
+check "a-fifo-does-not-hang-the-appender" $([ "$rc" -ne 142 ]; echo $?) 0
+check "a-fifo-is-refused" $([ "$rc" -eq 3 ] || [ "$rc" -eq 2 ]; echo $?) 0
 rm -f "$HANDOFF_LOG"
-_handoff_log_same_file "$IDENT_A"
-check "a-vanished-path-is-detected" $? 1
 
-# --- could-not-determine is not a pass -------------------------------------
-# An empty "before" means the identity was never read. Answering "same file"
-# to a question that was never asked is the exact shape 24-absence-is-not-
-# evidence forbids: a check that inspected nothing must not report clean.
-: > "$HANDOFF_LOG"
-_handoff_log_same_file ""
-check "an-unreadable-before-value-is-not-a-pass" $? 1
+# --- a directory is refused ------------------------------------------------
+mkdir -p "$HANDOFF_LOG"
+_handoff_append "$IDENT" "nope"; rc=$?
+check "a-directory-is-refused" $([ "$rc" -eq 3 ] || [ "$rc" -eq 2 ]; echo $?) 0
+rmdir "$HANDOFF_LOG"
 
-# --- end to end: a fresh log is created 0600 -------------------------------
+# --- end to end: handoff_log creates the file 0600 -------------------------
 rm -f "$HANDOFF_LOG"
 handoff_log "unit row" >/dev/null 2>&1
 check "handoff_log-creates-the-file" $([ -f "$HANDOFF_LOG" ]; echo $?) 0
-check "handoff_log-creates-it-0600" $([ "$(stat -f %Lp "$HANDOFF_LOG")" = "600" ]; echo $?) 0
+check "handoff_log-creates-it-0600" "$(stat -f %Lp "$HANDOFF_LOG")" "600"
+check "handoff_log-writes-the-line" $(grep -q 'unit row' "$HANDOFF_LOG"; echo $?) 0
 
 rm -rf "$(dirname "$UNITROOT")"
