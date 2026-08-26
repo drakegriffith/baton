@@ -226,28 +226,74 @@ run_watched() {
   # started. The two mktemp files above are still scratch and still deleted;
   # these are not.
   local unit="night-$(date -u +%Y%m%dT%H%M%SZ)-$$-$name"
-  runs_record_start "$unit" "$pid" "$(runs_fingerprint "$pid")" "claude ${resume_args[*]-} $*"
-
-  # The handoff log's launch record is written HERE and only here, which is
-  # the first point in this function where all three things are true: the
-  # session lock is held (or was never needed), the child has a pid, and the
-  # receipt that lib/runs.sh will read back at restart exists.
-  #
-  # It used to be written by night_mode BEFORE calling this function, which
-  # put it before the lock claim a dozen lines above. A refused resume dies
-  # up there, so the log was left asserting a launch that never happened --
-  # in the one durable record of the night, read hours later by someone who
-  # cannot see the terminal, and in the file that makes a refusal (the guard
-  # WORKING) indistinguishable from a child that started and vanished.
-  # night_mode still logs what it is about to try; the difference is a tense.
-  case "$resume_mode" in
-    resume:*) handoff_log "LAUNCHED: resumed session ${resume_mode#resume:} under account '$name' as unit $unit (pid $pid)" ;;
-    continue) handoff_log "LAUNCHED: continued the last session under account '$name' as unit $unit (pid $pid)" ;;
-    *)        handoff_log "LAUNCHED: account '$name' as unit $unit (pid $pid)" ;;
-  esac
+  local receipt_ok=1
+  runs_record_start "$unit" "$pid" "$(runs_fingerprint "$pid")" "claude ${resume_args[*]-} $*" \
+    || receipt_ok=0
 
   local interval="$NIGHT_INTERVAL"
   local cursors="" f size offset class line
+
+  # Did the child actually START? `cmd &` hands back a pid whatever happens
+  # next: if the exec fails -- binary missing, or present and not executable
+  # -- the child exits 126/127 immediately and nothing ever ran, but the fork
+  # already succeeded and the pid already exists. Writing LAUNCHED off the
+  # back of that records that BASH MANAGED TO FORK, which is not the claim
+  # the line makes.
+  #
+  # So the child is given one watch tick to still be there. `ps -o state=`
+  # rather than `kill -0`, because a child that has exited but not yet been
+  # reaped is a ZOMBIE and kill -0 SUCCEEDS on a zombie -- the exact case
+  # being tested for would read as alive.
+  #
+  # The status is captured here rather than re-waited later: `wait` on an
+  # already-reaped pid returns 127, which would overwrite a child's real exit
+  # code with a fake one on its way to NIGHT_EXIT_CODE.
+  sleep "$interval"
+  local launch_code="" state
+  state=$(ps -p "$pid" -o state= 2>/dev/null | tr -d ' ')
+  case "$state" in
+    ''|Z*) wait "$pid" 2>/dev/null; launch_code=$? ;;
+  esac
+
+  # The handoff log's launch record is written HERE and only here: the first
+  # point where the session lock is held (or was never needed), the receipt
+  # lib/runs.sh reads back at restart is on disk, and a child has actually
+  # been observed.
+  #
+  # It used to be written by night_mode BEFORE calling this function, which
+  # put it before the lock claim above. A refused resume dies up there, so the
+  # log was left asserting a launch that never happened -- in the one durable
+  # record of the night, read hours later by someone who cannot see the
+  # terminal, and in the file that makes a refusal (the guard WORKING)
+  # indistinguishable from a child that started and vanished. night_mode still
+  # logs what it is about to try; the difference is a tense.
+  local what
+  case "$resume_mode" in
+    resume:*) what="resumed session ${resume_mode#resume:} under account '$name'" ;;
+    continue) what="continued the last session under account '$name'" ;;
+    *)        what="account '$name'" ;;
+  esac
+  if [ "$receipt_ok" -eq 0 ]; then
+    # No receipt means no durable evidence this child exists, so there is
+    # nothing to point a restart at and no launch to claim. Same rule as the
+    # lock: the record follows the evidence, never the intention.
+    handoff_log "LAUNCH FAILED: $what -- the launch receipt for unit $unit could not be written, so nothing durable records this child"
+    warn "the launch receipt for '$name' could not be written; see $HANDOFF_LOG"
+  elif [ -n "$launch_code" ] && { [ "$launch_code" = 127 ] || [ "$launch_code" = 126 ]; }; then
+    # 127 is "command not found", 126 is "found, not executable". Both mean
+    # the exec never happened -- the one case where a pid existed and a
+    # session did not.
+    handoff_log "LAUNCH FAILED: $what -- the child could not be executed (exit $launch_code); no session started"
+    warn "'$name' could not be launched (exit $launch_code); see $HANDOFF_LOG"
+  elif [ -n "$launch_code" ]; then
+    # It ran and has already finished: a headless child that did its work, or
+    # one that hit its limit on the first call. That IS a launch, and calling
+    # it a failure would put a false line in the log to avoid a false line in
+    # the log.
+    handoff_log "LAUNCHED: $what as unit $unit (pid $pid); already exited $launch_code before the first watch tick"
+  else
+    handoff_log "LAUNCHED: $what as unit $unit (pid $pid)"
+  fi
 
   while kill -0 "$pid" 2>/dev/null; do
     sleep "$interval"
@@ -290,8 +336,17 @@ EOF
   done
 
   rm -f "$ref" "$snap"
-  wait "$pid"
-  local code=$?
+  # A child reaped by the start-up liveness check above must NOT be waited on
+  # again: `wait` on an already-reaped pid answers 127, and that fake code
+  # would flow straight into runs_record_complete and NIGHT_EXIT_CODE, so a
+  # clean headless exit would read as "command not found".
+  local code
+  if [ -n "$launch_code" ]; then
+    code="$launch_code"
+  else
+    wait "$pid"
+    code=$?
+  fi
   # The completion receipt is written from the code wait() actually returned,
   # before anything else can fail. It is the only evidence that closes a unit,
   # so it is never written from an assumption about how the child ended.
