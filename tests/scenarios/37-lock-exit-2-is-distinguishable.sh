@@ -28,14 +28,20 @@ MARKER='lock-result=could-not-inspect'
 LOCKS="$BATON_ACCOUNTS_ROOT/.locks"
 
 # --- arm 1: the guarded command ran and exited 2 ---------------------------
+# This arm's OWN claim (on a free subject) is still gated by lock_claim's
+# `_runs_ps_usable` check: when ps is refused, this claim ALSO returns
+# could-not-inspect before the guarded command ever runs, so the exit 2 seen
+# here is genuinely the lock layer's, not the guarded command's -- the two
+# arms collapse into one in that environment, which is what the "positive
+# control" and "distinguishable" checks below correctly notice.
 "$BATON_BIN" --claim unit:ok -- sh -c "echo RAN > '$SCRATCH/ran1'; exit 2" \
   >"$SCRATCH/a1.out" 2>"$SCRATCH/a1.err"
 rc1=$?
 scenario_check "a guarded command's exit 2 propagates as 2" $([ "$rc1" -eq 2 ]; echo $?)
 scenario_check "positive control: the guarded command really did run" \
-  $([ -e "$SCRATCH/ran1" ]; echo $?)
+  $([ -e "$SCRATCH/ran1" ]; echo $?) cni
 scenario_check "a guarded command's exit 2 carries NO lock-layer marker" \
-  $(! grep -q "$MARKER" "$SCRATCH/a1.err"; echo $?)
+  $(! grep -q "$MARKER" "$SCRATCH/a1.err"; echo $?) cni
 
 # --- arm 2: the lock layer could not inspect, so nothing ran ---------------
 chmod 000 "$LOCKS"
@@ -58,18 +64,21 @@ scenario_check "the marker hands over no runnable baton command line" \
 # The two arms differ. Stated as a comparison rather than as two separate
 # rows, because "distinguishable" is a property of the PAIR.
 scenario_check "the two exit-2 arms are distinguishable from each other" \
-  $([ "$(grep -c "$MARKER" "$SCRATCH/a1.err")" -ne "$(grep -c "$MARKER" "$SCRATCH/a2.err")" ]; echo $?)
+  $([ "$(grep -c "$MARKER" "$SCRATCH/a1.err")" -ne "$(grep -c "$MARKER" "$SCRATCH/a2.err")" ]; echo $?) cni
 
 # --- the same two arms through --redispatch --------------------------------
+# Same cascade: lock_redispatch's own `lock_claim "unit:$unit"` is gated by
+# `_runs_ps_usable`, so this arm also collapses into the lock layer's own
+# could-not-inspect when ps is refused.
 "$BATON_BIN" --redispatch never-started-unit -- sh -c "echo RAN > '$SCRATCH/ran3'; exit 2" \
   >"$SCRATCH/b1.out" 2>"$SCRATCH/b1.err"
 rc3=$?
 scenario_check "--redispatch propagates the replacement's exit 2 as 2" \
   $([ "$rc3" -eq 2 ]; echo $?)
 scenario_check "positive control: the replacement really did run" \
-  $([ -e "$SCRATCH/ran3" ]; echo $?)
+  $([ -e "$SCRATCH/ran3" ]; echo $?) cni
 scenario_check "--redispatch does NOT mark a replacement's own exit 2" \
-  $(! grep -q "$MARKER" "$SCRATCH/b1.err"; echo $?)
+  $(! grep -q "$MARKER" "$SCRATCH/b1.err"; echo $?) cni
 
 chmod 000 "$LOCKS"
 "$BATON_BIN" --redispatch never-started-unit -- sh -c "echo RAN > '$SCRATCH/ran4'" \

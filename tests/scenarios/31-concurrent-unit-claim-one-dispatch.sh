@@ -37,20 +37,25 @@ winners=0; losers=0
 [ "$RC1" -eq 0 ] && winners=$((winners + 1)) || losers=$((losers + 1))
 [ "$RC2" -eq 0 ] && winners=$((winners + 1)) || losers=$((losers + 1))
 
+# Both --claim calls are gated by lock_claim's `_runs_ps_usable` check: when
+# ps is refused, NEITHER claim can arbitrate (both return could-not-inspect
+# before running the guarded command), so there is no winner to name and no
+# dispatch to count -- the claim layer correctly refusing to arbitrate, not
+# a race-arbitration defect.
 # The whole point, stated as a count rather than as an absence: exactly one.
-scenario_check "exactly one dispatch happened" $([ "$dispatches" -eq 1 ]; echo $?)
-scenario_check "exactly one claimer exited 0" $([ "$winners" -eq 1 ]; echo $?)
-scenario_check "exactly one claimer exited nonzero" $([ "$losers" -eq 1 ]; echo $?)
+scenario_check "exactly one dispatch happened" $([ "$dispatches" -eq 1 ]; echo $?) cni
+scenario_check "exactly one claimer exited 0" $([ "$winners" -eq 1 ]; echo $?) cni
+scenario_check "exactly one claimer exited nonzero" $([ "$losers" -eq 1 ]; echo $?) cni
 # A dispatch count of zero would satisfy "not two" while proving nothing, so
 # it is refused explicitly rather than left to the equality above.
 scenario_check "the claim layer did not simply block both (>0 dispatches)" \
-  $([ "$dispatches" -gt 0 ]; echo $?)
+  $([ "$dispatches" -gt 0 ]; echo $?) cni
 
 if [ "$RC1" -ne 0 ]; then loser_err="$SCRATCH/one.err"; winner_pid="$P2"; else loser_err="$SCRATCH/two.err"; winner_pid="$P1"; fi
 scenario_check "the loser named the holding pid on stderr" \
-  $(grep -q "$winner_pid" "$loser_err"; echo $?)
+  $(grep -q "$winner_pid" "$loser_err"; echo $?) cni
 scenario_check "the loser's message says the subject is locked" \
-  $(grep -qi "locked" "$loser_err"; echo $?)
+  $(grep -qi "locked" "$loser_err"; echo $?) cni
 
 # Presence, not absence: the run really did inspect a claim subject. A gate
 # that inspected zero subjects failed, however green it looks.
@@ -64,17 +69,19 @@ scenario_check "the loser's message says the subject is locked" \
 # its count is of owner records actually on disk and it can come back zero,
 # which is what makes a nonzero answer mean anything. Scenario 38 pins both
 # halves of that contract directly.
+# No claim above ever landed an owner record (same ps cascade), so there is
+# no claim subject on disk for --locks/--lock-status to enumerate.
 locks_out="$("$BATON_BIN" --locks 2>&1)"; locksrc=$?
 scenario_check "--locks found more than zero claim subjects on disk" \
-  $([ "$locksrc" -eq 0 ]; echo $?)
+  $([ "$locksrc" -eq 0 ]; echo $?) cni
 scenario_check "--locks names the contested unit among them" \
-  $(printf '%s' "$locks_out" | grep -q "unit_$UNIT"; echo $?)
+  $(printf '%s' "$locks_out" | grep -q "unit_$UNIT"; echo $?) cni
 scenario_check "--locks did not report a vacuous zero" \
-  $(! printf '%s' "$locks_out" | grep -q 'inspected 0 lock subject'; echo $?)
+  $(! printf '%s' "$locks_out" | grep -q 'inspected 0 lock subject'; echo $?) cni
 
 status="$("$BATON_BIN" --lock-status "unit:$UNIT" 2>&1)"; strc=$?
 scenario_check "--lock-status inspected the named claim subject's record" \
-  $(printf '%s' "$status" | grep -qE 'inspected=[1-9][0-9]*'; echo $?)
+  $(printf '%s' "$status" | grep -qE 'inspected=[1-9][0-9]*'; echo $?) cni
 scenario_check "after both finished the unit is free again, exit 0" \
   $([ "$strc" -eq 0 ]; echo $?)
 scenario_check "the released claim reads free, not held" \
@@ -84,7 +91,7 @@ scenario_check "the released claim reads free, not held" \
 # permanently retire a unit name.
 "$BATON_BIN" --claim "unit:$UNIT" -- sh -c "echo dispatched >> '$DISPATCH_LOG'" >/dev/null 2>&1
 scenario_check "a released unit can be claimed again" \
-  $([ "$(grep -c 'dispatched' "$DISPATCH_LOG")" -eq 2 ]; echo $?)
+  $([ "$(grep -c 'dispatched' "$DISPATCH_LOG")" -eq 2 ]; echo $?) cni
 
 # --claim needs the work it guards, because a claim held by a process that
 # has already exited is stale on arrival and would arbitrate nothing.

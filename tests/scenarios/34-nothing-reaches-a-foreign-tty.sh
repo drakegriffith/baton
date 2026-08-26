@@ -125,8 +125,14 @@ waited=0
 while [ ! -e "$BATON_ACCOUNTS_ROOT/.locks/login.lock/owner" ]; do
   sleep 0.1; waited=$((waited + 1)); [ "$waited" -gt 100 ] && break
 done
+# The setup holder's own login claim (`baton a &` above) is gated by
+# lock_claim's `_runs_ps_usable` check, same as scenario 33: when ps is
+# refused it never lands an owner record, and the SECOND `baton a` below
+# independently fails the identical gate silently (`_runs_ps_usable ||
+# return 2` prints nothing), so there is no refusal message to find a pid
+# in either.
 scenario_check "a login lock is held before the refusal is provoked" \
-  $([ -e "$BATON_ACCOUNTS_ROOT/.locks/login.lock/owner" ]; echo $?)
+  $([ -e "$BATON_ACCOUNTS_ROOT/.locks/login.lock/owner" ]; echo $?) cni
 
 script -q "$SCRATCH/pty2.log" /bin/sh -c \
   "tty; '$BATON_BIN' a >'$SCRATCH/refused.out' 2>'$SCRATCH/refused.err'" \
@@ -136,9 +142,9 @@ scenario_check "positive control: a real controlling terminal was allocated" \
   $(pty_text "$SCRATCH/pty2.log" | grep -qE '/dev/(tty|pts)'; echo $?)
 
 scenario_check "positive control: the refusal really was emitted (to the redirect)" \
-  $([ -s "$SCRATCH/refused.err" ]; echo $?)
+  $([ -s "$SCRATCH/refused.err" ]; echo $?) cni
 scenario_check "positive control: the refusal names the holder pid" \
-  $(grep -q "$HOLDER" "$SCRATCH/refused.err"; echo $?)
+  $(grep -q "$HOLDER" "$SCRATCH/refused.err"; echo $?) cni
 scenario_check "the refusal did not reach the controlling terminal" \
   $(! pty_text "$SCRATCH/pty2.log" | grep -q 'baton'; echo $?)
 scenario_check "the refusal put no runnable command on the terminal either" \

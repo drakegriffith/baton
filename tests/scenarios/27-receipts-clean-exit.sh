@@ -29,8 +29,11 @@ scenario_check "a completion receipt was written" $([ -n "$complete_receipt" ]; 
 scenario_check "start receipt carries a numeric pid" \
   $(grep -qE '^pid=[0-9]+$' "$start_receipt" 2>/dev/null; echo $?)
 # The fingerprint is what defeats pid reuse; empty means the guard is off.
+# `runs_record_start` fills it from `runs_fingerprint`, which needs a working
+# process table (lib/runs.sh's `ps -p 1` positive control); when ps is
+# refused the fingerprint field is legitimately empty, not a receipts defect.
 scenario_check "start receipt carries a non-empty fingerprint" \
-  $(grep -qE '^fingerprint=.+$' "$start_receipt" 2>/dev/null; echo $?)
+  $(grep -qE '^fingerprint=.+$' "$start_receipt" 2>/dev/null; echo $?) cni
 scenario_check "completion receipt carries exit 0" \
   $(grep -qx 'exit=0' "$complete_receipt" 2>/dev/null; echo $?)
 

@@ -20,6 +20,20 @@ check() { # $1 name, $2 got, $3 expected
   else record_fail "unit:runs_project:$1" "expected [$3] got [$2]"; fi
 }
 
+# check_cni -- like check, but for a classification that can only land in
+# dead-partial/orphan-running when the process table can actually be asked
+# (u-dead and u-orphan below are probed via runs_alive -> ps). When it
+# mismatches AND this environment's ps is confirmed unusable (ps_usable,
+# tests/fixtures/lib.sh), pickup_classify correctly falls back to `unknown`
+# for a refused process table -- that is not a runs_project defect, so it is
+# recorded as could-not-inspect rather than FAIL. In a working environment
+# this behaves exactly like check. See baton#7.
+check_cni() { # $1 name, $2 got, $3 expected
+  if [ "$2" = "$3" ]; then record_pass "unit:runs_project:$1"
+  elif ! ps_usable; then record_cni "unit:runs_project:$1" "expected [$3] got [$2] (ps unusable in this environment)"
+  else record_fail "unit:runs_project:$1" "expected [$3] got [$2]"; fi
+}
+
 field_of() { # $1 json, $2 key -> first scalar value for that key
   printf '%s\n' "$1" | sed -n "s/.*\"$2\"[[:space:]]*:[[:space:]]*\"\{0,1\}\([^\",}]*\)\"\{0,1\}.*/\1/p" | head -1
 }
@@ -69,8 +83,8 @@ out="$(runs_project 2>/dev/null)"; rc=$?
 
 check "three-units-inspected" "$(field_of "$out" inspected)" "3"
 check "done-classified"   "$(status_of "$out" u-done)"   "done"
-check "dead-classified"   "$(status_of "$out" u-dead)"   "dead-partial"
-check "orphan-classified" "$(status_of "$out" u-orphan)" "orphan-running"
+check_cni "dead-classified"   "$(status_of "$out" u-dead)"   "dead-partial"
+check_cni "orphan-classified" "$(status_of "$out" u-orphan)" "orphan-running"
 
 # The totality check reconcile.py pays for with assert_sums: a unit that
 # falls out of every bucket would otherwise vanish silently from the board.

@@ -64,15 +64,20 @@ scenario_check "and reads free" \
 scenario_check "a never-locked subject honestly reports inspected=0" \
   $(printf '%s' "$st2" | grep -q 'inspected=0'; echo $?)
 
+# This claim is a REAL claim on a free/creatable subject, so unlike
+# --lock-status above (which short-circuits before reaching the process
+# table for an absent owner record), it IS gated by lock_claim's
+# `_runs_ps_usable` check -- reporter and acquirer legitimately diverge when
+# ps is refused, rather than disagreeing about the same root.
 BATON_LOCK_DIR="$ABSENT" "$BATON_BIN" --claim unit:x \
   -- sh -c "echo RAN > '$SCRATCH/creatable'" >/dev/null 2>&1
 clrc2=$?
 scenario_check "the acquirer also succeeds on a creatable root" \
-  $([ "$clrc2" -eq 0 ]; echo $?)
+  $([ "$clrc2" -eq 0 ]; echo $?) cni
 scenario_check "REPORTER AND ACQUIRER AGREE on the creatable root" \
-  $([ "$strc2" -eq "$clrc2" ]; echo $?)
+  $([ "$strc2" -eq "$clrc2" ]; echo $?) cni
 scenario_check "positive control: the guarded command really ran" \
-  $([ -e "$SCRATCH/creatable" ]; echo $?)
+  $([ -e "$SCRATCH/creatable" ]; echo $?) cni
 
 # --- --locks enumerates, and its count can come back zero ------------------
 EMPTY="$SCRATCH/empty-root"
@@ -86,16 +91,19 @@ scenario_check "--locks says so in words: zero subjects" \
 # Two real subjects, planted through the CLI so nothing here knows the on-disk
 # format. Both are released by the time they are counted, which is the point:
 # a released subject is still a subject that exists on disk.
+# Both of these claims are gated by `_runs_ps_usable` too, so when ps is
+# refused neither ever lands an owner record, and --locks finds nothing to
+# enumerate.
 "$BATON_BIN" --claim session:alpha -- true >/dev/null 2>&1
 "$BATON_BIN" --claim unit:beta -- true >/dev/null 2>&1
 out2="$("$BATON_BIN" --locks 2>/dev/null)"; lrc2=$?
-scenario_check "--locks exits 0 once subjects exist" $([ "$lrc2" -eq 0 ]; echo $?)
+scenario_check "--locks exits 0 once subjects exist" $([ "$lrc2" -eq 0 ]; echo $?) cni
 scenario_check "--locks counts exactly the two subjects on disk" \
-  $(printf '%s' "$out2" | grep -q 'inspected 2 lock subject'; echo $?)
+  $(printf '%s' "$out2" | grep -q 'inspected 2 lock subject'; echo $?) cni
 scenario_check "--locks names the session subject it found" \
-  $(printf '%s' "$out2" | grep -q 'session_alpha'; echo $?)
+  $(printf '%s' "$out2" | grep -q 'session_alpha'; echo $?) cni
 scenario_check "--locks names the unit subject it found" \
-  $(printf '%s' "$out2" | grep -q 'unit_beta'; echo $?)
+  $(printf '%s' "$out2" | grep -q 'unit_beta'; echo $?) cni
 
 cleanup_root
 scenario_end

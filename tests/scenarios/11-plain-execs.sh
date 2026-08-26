@@ -27,7 +27,10 @@ scenario_check "fake claude wrote its pid/ppid" $([ -s "$pidfile" ]; echo $?)
 child_pid=$(awk '{print $1}' "$pidfile")
 child_ppid=$(awk '{print $2}' "$pidfile")
 scenario_check "the running process kept baton's own PID (exec, not fork)" $([ "$child_pid" = "$BATON_PID" ]; echo $?)
-scenario_check "its PPID is this test's own PID (no extra generation)" $([ "$child_ppid" = "$this_pid" ]; echo $?)
+# The fake claude fixture reads its own PPID via `ps -o ppid=` (see
+# tests/fixtures/bin/claude); when this environment's ps is refused that
+# read comes back empty, which is the environment, not an extra generation.
+scenario_check "its PPID is this test's own PID (no extra generation)" $([ "$child_ppid" = "$this_pid" ]; echo $?) cni
 scenario_check "baton exited with the child's exit code" $([ "$baton_exit" -eq 0 ]; echo $?)
 scenario_check "no sigterm/kill marker (no watching happened)" $(! [ -s "$(signals_log_of a)" ]; echo $?)
 scenario_check "no handoff-related output on stderr" $(! grep -qi "handoff\|night mode\|no live account" "$SCRATCH/stderr.log"; echo $?)

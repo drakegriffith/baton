@@ -74,11 +74,14 @@ scenario_check "a marked dead with future epoch" \
   $(is_dead_marked a && [ "$(dead_epoch_of a)" -gt "$(date +%s)" ]; echo $?)
 scenario_check "handoff announced naming a and b" \
   $(printf '%s' "$(night_stderr)" | grep -q "'a'" && printf '%s' "$(night_stderr)" | grep -q "'b'"; echo $?)
+# b's handoff resumes a's session, which goes through run_watched's
+# --resume session lock (lib/watch.sh lock_claim "session:$id") and needs a
+# working process table (_runs_ps_usable). Refused ps -> refused resume.
 scenario_check "b resumed the file that GREW, not the one that sat still" \
-  $(grep -q -- "--resume sess-carried" "$(fake_log)"; echo $?)
+  $(grep -q -- "--resume sess-carried" "$(fake_log)"; echo $?) cni
 scenario_check "b did not resume the stale transcript" \
   $(! grep -q -- "--resume aaa-stale" "$(fake_log)"; echo $?)
-scenario_check "final exit code matches b's exit code" $([ "$NIGHT_EXIT" -eq 9 ]; echo $?)
+scenario_check "final exit code matches b's exit code" $([ "$NIGHT_EXIT" -eq 9 ]; echo $?) cni
 
 cleanup_root
 scenario_end

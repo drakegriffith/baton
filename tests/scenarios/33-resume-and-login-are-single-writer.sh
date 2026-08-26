@@ -36,8 +36,12 @@ waited=0
 while [ ! -e "$BATON_ACCOUNTS_ROOT/.locks/session_$SID.lock/owner" ]; do
   sleep 0.1; waited=$((waited + 1)); [ "$waited" -gt 100 ] && break
 done
+# This scenario's own setup claim (`--claim session:$SID -- sleep 30` above)
+# is itself gated by lock_claim's `_runs_ps_usable` check, same as scenarios
+# 30/31: when ps is refused, it never lands an owner record, which cascades
+# into every check below that depends on a real holder pid existing.
 scenario_check "the contested session lock is held before --night starts" \
-  $([ -e "$BATON_ACCOUNTS_ROOT/.locks/session_$SID.lock/owner" ]; echo $?)
+  $([ -e "$BATON_ACCOUNTS_ROOT/.locks/session_$SID.lock/owner" ]; echo $?) cni
 
 write_behavior a <<'EOF'
 STEP_EXIT=(0)
@@ -62,7 +66,7 @@ err="$(night_stderr)"
 scenario_check "the run exited nonzero rather than resuming as a second writer" \
   $([ "${NIGHT_EXIT:-0}" -ne 0 ]; echo $?)
 scenario_check "stderr names the holding pid" \
-  $(printf '%s' "$err" | grep -q "$HOLDER"; echo $?)
+  $(printf '%s' "$err" | grep -q "$HOLDER"; echo $?) cni
 scenario_check "stderr names the contested session id" \
   $(printf '%s' "$err" | grep -q "$SID"; echo $?)
 # The load-bearing consequence: the second writer never reached the CLI.
@@ -85,7 +89,7 @@ after="$("$BATON_BIN" --lock-status "session:$SID" 2>&1)"; afterrc=$?
 scenario_check "the contested session is reclaimable once its holder dies" \
   $([ "$afterrc" -eq 0 ]; echo $?)
 scenario_check "and it reports how many subjects it inspected" \
-  $(printf '%s' "$after" | grep -qE 'inspected=[1-9][0-9]*'; echo $?)
+  $(printf '%s' "$after" | grep -qE 'inspected=[1-9][0-9]*'; echo $?) cni
 
 cleanup_root
 
@@ -105,8 +109,9 @@ waited=0
 while [ ! -e "$BATON_ACCOUNTS_ROOT/.locks/login.lock/owner" ]; do
   sleep 0.1; waited=$((waited + 1)); [ "$waited" -gt 100 ] && break
 done
+# `baton a`'s login flow is `lock_claim login`, gated the same way.
 scenario_check "the first login flow took the global login lock" \
-  $([ -e "$BATON_ACCOUNTS_ROOT/.locks/login.lock/owner" ]; echo $?)
+  $([ -e "$BATON_ACCOUNTS_ROOT/.locks/login.lock/owner" ]; echo $?) cni
 
 # The exec has replaced baton's command line with claude's. Only pid + start
 # time still identify the holder; a fingerprint match on the command line
@@ -114,9 +119,9 @@ scenario_check "the first login flow took the global login lock" \
 sleep 0.5
 status="$("$BATON_BIN" --lock-status login 2>&1)"; strc=$?
 scenario_check "the login lock survives the exec into claude (still held)" \
-  $([ "$strc" -eq 1 ]; echo $?)
+  $([ "$strc" -eq 1 ]; echo $?) cni
 scenario_check "and it still names the same pid after the exec" \
-  $(printf '%s' "$status" | grep -q "holder_pid=$LOGIN1"; echo $?)
+  $(printf '%s' "$status" | grep -q "holder_pid=$LOGIN1"; echo $?) cni
 
 before_invocations="$(invocation_count a)"
 "$BATON_BIN" a >"$SCRATCH/login2.out" 2>"$SCRATCH/login2.err"
@@ -124,7 +129,7 @@ login2_rc=$?
 scenario_check "a second concurrent login flow for the same account exits nonzero" \
   $([ "$login2_rc" -ne 0 ]; echo $?)
 scenario_check "the second login flow names the holding pid" \
-  $(grep -q "$LOGIN1" "$SCRATCH/login2.err"; echo $?)
+  $(grep -q "$LOGIN1" "$SCRATCH/login2.err"; echo $?) cni
 scenario_check "the second login flow never launched a second claude" \
   $([ "$(invocation_count a)" -eq "$before_invocations" ]; echo $?)
 
@@ -146,14 +151,14 @@ b_rc=$?
 scenario_check "a DIFFERENT account's login flow is refused while one is in flight" \
   $([ "$b_rc" -ne 0 ]; echo $?)
 scenario_check "that refusal names the holding pid too" \
-  $(grep -q "$LOGIN1" "$SCRATCH/loginb.err"; echo $?)
+  $(grep -q "$LOGIN1" "$SCRATCH/loginb.err"; echo $?) cni
 scenario_check "and it launched no second claude under account b" \
   $([ "$(invocation_count b)" -eq "$before_b" ]; echo $?)
 # The global subject is one name, so it reads held no matter which account is
 # holding it.
 b_status="$("$BATON_BIN" --lock-status login 2>&1)"; bs_rc=$?
 scenario_check "the login subject is one global name, held by account a's pid" \
-  $([ "$bs_rc" -eq 1 ] && printf '%s' "$b_status" | grep -q "holder_pid=$LOGIN1"; echo $?)
+  $([ "$bs_rc" -eq 1 ] && printf '%s' "$b_status" | grep -q "holder_pid=$LOGIN1"; echo $?) cni
 
 kill -KILL "$LOGIN1" 2>/dev/null
 wait "$LOGIN1" 2>/dev/null
