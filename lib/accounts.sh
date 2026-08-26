@@ -129,16 +129,14 @@ _handoff_log_usable() {
     HANDOFF_LOG_WHY="that path exists but is not a regular file"
     return 1
   fi
-  # Created with `>>`, not `:>`, so two nights racing to create the log
-  # cannot truncate each other's. umask 077 in the subshell is what makes it
-  # 0600, and it applies to the open the redirection performs.
-  #
-  # Only on creation. An existing log is left at whatever mode it has:
-  # tightening a file the operator may have deliberately opened up is a
-  # side effect, and the disclosure this closes is baton's own default.
-  ( umask 077; : >> "$HANDOFF_LOG" ) 2>/dev/null && return 0
-  HANDOFF_LOG_WHY="that path could not be created"
-  return 1
+  # A MISSING log is not refused, and it is not created here either. This
+  # function used to create it with `( umask 077; : >> ... )` -- a SECOND open
+  # of the same path, carrying none of the flags that make the python one
+  # safe. A FIFO swapped in before it blocked forever, in the exact call this
+  # whole guard exists to keep from blocking, and a symlink swapped in was
+  # followed. Creation belongs to the one open that can refuse: python's
+  # O_CREAT|O_NOFOLLOW at mode 0600, below.
+  return 0
 }
 
 # _handoff_log_ident -- the path's identity as LSTAT sees it (device:inode),
@@ -216,14 +214,21 @@ handoff_log() {
   # Once refused, stay refused and stay quiet: the caller is a loop over
   # accounts, and re-testing (or re-reporting) per iteration would rebuild
   # the cascade this whole change removed.
-  [ -n "$HANDOFF_LOG_BROKEN" ] && return 0
+  [ -n "$HANDOFF_LOG_BROKEN" ] && return 3
   # A root baton creates is 0700: it holds every account's config dir, and
   # the 0755 the common 022 umask gives lists them to anyone on the box.
   # Creation only -- an existing root's mode belongs to the operator.
   ( umask 077; mkdir -p "$ROOT" ) 2>/dev/null
   HANDOFF_LOG_WHY="that path could not be appended to"
   local ident_before rc
-  if _handoff_log_usable; then
+  if ! command -v python3 >/dev/null 2>&1; then
+    # python3 is a declared dependency (README "Requires"), and the no-follow
+    # open is the only safe way this program has to write this file. Without
+    # it the line is lost. Refusing loudly beats falling back to `>>`: a
+    # silent downgrade of the guard is worse than a missing dependency,
+    # because the operator can fix a missing dependency.
+    HANDOFF_LOG_WHY="python3 is not on PATH, and it is what performs the no-follow append"
+  elif _handoff_log_usable; then
     ident_before=$(_handoff_log_ident)
     _handoff_append "$ident_before" "$(date '+%Y-%m-%d %H:%M:%S') baton: $*"; rc=$?
     case "$rc" in
@@ -232,9 +237,20 @@ handoff_log() {
       *) HANDOFF_LOG_WHY="that path could not be opened for appending" ;;
     esac
   fi
-  HANDOFF_LOG_BROKEN=1
-  echo "baton: WARNING -- this line could not be written to the handoff log $HANDOFF_LOG ($HANDOFF_LOG_WHY), so this one line is lost. Later lines may still land there once that path is fixed. Check account status for the current state. (Shown once.)" >&2
-  return 0
+  # The notice is once per process; the RETURN CODE is every time. It used to
+  # be `return 0` unconditionally, so a caller could not tell a written line
+  # from a lost one and the only signal was a string on the stream this file
+  # exists to keep quiet. 3 is the same "refused" code _handoff_append uses.
+  #
+  # Audited at every call site before changing it: none branches on this
+  # status, and none has a fallback that would print the instruction to a
+  # shared stream instead -- which is the one reaction that would turn a
+  # logging failure back into issue #2.
+  if [ -z "$HANDOFF_LOG_BROKEN" ]; then
+    HANDOFF_LOG_BROKEN=1
+    echo "baton: WARNING -- this line could not be written to the handoff log $HANDOFF_LOG ($HANDOFF_LOG_WHY), so this one line is lost. Later lines may still land there once that path is fixed. Check account status for the current state. (Shown once.)" >&2
+  fi
+  return 3
 }
 
 # handoff_log_quoted LABEL TEXT -- record text baton did not write itself

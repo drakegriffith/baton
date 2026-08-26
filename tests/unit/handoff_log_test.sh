@@ -88,4 +88,54 @@ check "handoff_log-creates-the-file" $([ -f "$HANDOFF_LOG" ]; echo $?) 0
 check "handoff_log-creates-it-0600" "$(stat -f %Lp "$HANDOFF_LOG")" "600"
 check "handoff_log-writes-the-line" $(grep -q 'unit row' "$HANDOFF_LOG"; echo $?) 0
 
+# --- python3 absent: the line is LOST, and the caller is told --------------
+# Round-4 finding. handoff_log used to warn and then `return 0`, so a missing
+# python3 read to every caller exactly like a successful append. The notice is
+# necessary but it is not sufficient: a function that could not do its job
+# must say so in its exit status, or the only signal is a string on a stream
+# this codebase spends its whole effort keeping quiet.
+#
+# The PATH here is built from resolved absolute paths for the handful of
+# externals the append path uses, with python3 deliberately left out --
+# prepending a shim cannot hide /usr/bin/python3, so the PATH is replaced
+# rather than shadowed.
+NOPY="$UNITROOT/nopy-bin"
+mkdir -p "$NOPY"
+for prog in mkdir date stat rm; do
+  src=$(command -v "$prog" 2>/dev/null)
+  [ -n "$src" ] && ln -sf "$src" "$NOPY/$prog"
+done
+rm -f "$HANDOFF_LOG"
+: > "$HANDOFF_LOG"
+printf 'pre-existing\n' > "$HANDOFF_LOG"
+before=$(cat "$HANDOFF_LOG")
+
+nopy_err="$UNITROOT/nopy.err"
+( PATH="$NOPY"; export PATH
+  command -v python3 >/dev/null 2>&1 && exit 99   # setup control: python3 must be gone
+  handoff_log "should not land" 2>"$nopy_err"
+  exit $? )
+rc=$?
+check "no-python3-is-not-silent-success" $([ "$rc" -ne 0 ]; echo $?) 0
+check "no-python3-returns-the-refused-code" "$rc" 3
+check "no-python3-emits-the-one-line-notice" \
+  $(grep -q 'could not be written' "$nopy_err"; echo $?) 0
+check "no-python3-leaves-the-log-unchanged" "$(cat "$HANDOFF_LOG")" "$before"
+check "no-python3-notice-is-not-pasteable" \
+  $([ "$(runnable_command_lines "$nopy_err")" -eq 0 ]; echo $?) 0
+check "positive control: that predicate can see a leak" \
+  $([ "$(predicate_positive_control "$UNITROOT/pc.txt")" -eq 3 ]; echo $?) 0
+
+# --- no shell pre-creation: python does the creating -----------------------
+# The bash `: >>` that used to create a missing log was a second open of the
+# same path, with none of the flags that make the python one safe -- so a FIFO
+# swapped in before it blocked exactly where the whole guard exists to not
+# block. Creation now happens once, inside the no-follow open.
+rm -f "$HANDOFF_LOG"
+mkfifo "$HANDOFF_LOG"
+perl -e 'alarm shift; exec @ARGV' 10 bash -c '. "$0"; handoff_log "x"' "$HERE/../../lib/accounts.sh" >/dev/null 2>&1
+rc=$?
+check "a-fifo-does-not-hang-handoff_log" $([ "$rc" -ne 142 ]; echo $?) 0
+rm -f "$HANDOFF_LOG"
+
 rm -rf "$(dirname "$UNITROOT")"
