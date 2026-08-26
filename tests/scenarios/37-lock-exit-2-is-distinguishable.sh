@@ -25,7 +25,7 @@ fresh_root
 export BATON_LOCK_PROV=test
 
 MARKER='lock-result=could-not-inspect'
-LOCKS="$BATON_ACCOUNTS_ROOT/.locks"
+LOCKS="$(baton_lock_dir)"
 
 # --- arm 1: the guarded command ran and exited 2 ---------------------------
 "$BATON_BIN" --claim unit:ok -- sh -c "echo RAN > '$SCRATCH/ran1'; exit 2" \

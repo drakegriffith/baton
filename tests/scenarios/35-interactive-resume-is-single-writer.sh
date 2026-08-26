@@ -22,7 +22,7 @@ scenario_begin "35-interactive-resume-is-single-writer"
 fresh_root
 export BATON_LOCK_PROV=test
 
-LOCKS="$BATON_ACCOUNTS_ROOT/.locks"
+LOCKS="$(baton_lock_dir)"
 SID="sess-shared-abc"
 OTHER="sess-uncontested-xyz"
 

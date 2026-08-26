@@ -85,7 +85,7 @@ scenario_check "precondition: the orphan really is alive right now" \
 "$BATON_BIN" --claim "unit:$UNIT" -- sleep 20 >/dev/null 2>"$SCRATCH/holder.err" &
 HOLDER=$!
 waited=0
-while [ ! -e "$BATON_ACCOUNTS_ROOT/.locks/unit_$UNIT.lock/owner" ]; do
+while [ ! -e "$(baton_lock_dir)/unit_$UNIT.lock/owner" ]; do
   sleep 0.1; waited=$((waited + 1)); [ "$waited" -gt 100 ] && break
 done
 

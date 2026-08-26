@@ -223,6 +223,17 @@ eq "kill_orphan-cannot-confirm-exits-2" "$(awk '{print $1}' "$SCRATCH_RUNS/uncon
 eq "kill_orphan-cannot-confirm-killed-nothing" "$(awk '{print $2}' "$SCRATCH_RUNS/unconfirmed")" "no"
 
 # ---------------------------------------------------------------------------
+# The could-not-inspect marker is emitted by the lock layer's own failures.
+# ---------------------------------------------------------------------------
+cni_out="$(_lock_cni 'session:test-subj' unit-test-reason 2>&1)"
+ok "lock-cni-emits-the-marker" \
+  "$(printf '%s' "$cni_out" | grep -q 'lock-result=could-not-inspect'; echo $?)"
+ok "lock-cni-names-the-subject" \
+  "$(printf '%s' "$cni_out" | grep -q "subject='session:test-subj'"; echo $?)"
+ok "lock-cni-names-the-reason" \
+  "$(printf '%s' "$cni_out" | grep -q 'reason=unit-test-reason'; echo $?)"
+
+# ---------------------------------------------------------------------------
 # The reporter and the acquirer read one lock root by ONE rule.
 #
 # They used to disagree: a root that cannot exist made lock_probe skip its
