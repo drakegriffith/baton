@@ -82,15 +82,77 @@ DEFAULT_DEAD=5h
 # per-iteration notice would rebuild the very cascade this change removed.
 # The notice deliberately contains no command -- being unable to record an
 # instruction is not a reason to start printing instructions.
+#
+# The notice says what it can actually support: THIS line is lost, and later
+# lines may still land if the path is fixed. It used to say "this run's
+# instructions were NOT recorded anywhere. Fix that path to get them back",
+# which claims both more and less than is true -- earlier lines in the same
+# process may well have landed, and fixing the path recovers nothing that was
+# already dropped.
 HANDOFF_LOG_BROKEN=""
+HANDOFF_LOG_WHY=""
+
+# _handoff_log_usable -- true when $HANDOFF_LOG is a path this program is
+# willing to append to, creating it 0600 if it does not exist. Sets
+# HANDOFF_LOG_WHY on refusal.
+#
+# `>>` follows symlinks and inherits the caller's umask, and both were
+# measured (scenario 42) rather than argued:
+#   - a link at .handoff.log pointing outside the accounts root took 424
+#     bytes of account and session detail with it;
+#   - a link to /dev/null lost every instruction of the night SILENTLY --
+#     the append succeeds, so the failed-append notice above never fires,
+#     which is the one failure shape a "did the write work?" check cannot
+#     see and the reason this is a TYPE check and not an error check;
+#   - a FIFO blocked baton for the full 20-second test alarm, because
+#     opening one for write with no reader waits forever, and this call sits
+#     in the watcher's failover path;
+#   - the created file was 0644 under the common 022 umask, world-readable,
+#     holding account names and session ids.
+#
+# The symlink test comes first because `-e` FOLLOWS the link: a link to a
+# regular file passes a type check and is then written through, which is
+# exactly the redirection half of the problem.
+_handoff_log_usable() {
+  if [ -L "$HANDOFF_LOG" ]; then
+    # Wording note: not "and baton does not append through one". The
+    # runnable-command predicate flags `baton <word>` anywhere on a shared
+    # stream, and it is right to -- prose that opens a clause with the
+    # program's name reads as a command line to a skimming eye, which is the
+    # entire mechanism of root cause 2. Operator-facing text says "baton"
+    # only as `baton:`, the message prefix.
+    HANDOFF_LOG_WHY="that path is a symbolic link, which is never appended through"
+    return 1
+  fi
+  if [ -e "$HANDOFF_LOG" ]; then
+    [ -f "$HANDOFF_LOG" ] && return 0
+    HANDOFF_LOG_WHY="that path exists but is not a regular file"
+    return 1
+  fi
+  # Created with `>>`, not `:>`, so two nights racing to create the log
+  # cannot truncate each other's. umask 077 in the subshell is what makes it
+  # 0600, and it applies to the open the redirection performs.
+  #
+  # Only on creation. An existing log is left at whatever mode it has:
+  # tightening a file the operator may have deliberately opened up is a
+  # side effect, and the disclosure this closes is baton's own default.
+  ( umask 077; : >> "$HANDOFF_LOG" ) 2>/dev/null && return 0
+  HANDOFF_LOG_WHY="that path could not be created"
+  return 1
+}
+
 handoff_log() {
+  # Once refused, stay refused and stay quiet: the caller is a loop over
+  # accounts, and re-testing (or re-reporting) per iteration would rebuild
+  # the cascade this whole change removed.
+  [ -n "$HANDOFF_LOG_BROKEN" ] && return 0
   mkdir -p "$ROOT" 2>/dev/null
-  if { printf '%s baton: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$HANDOFF_LOG"; } 2>/dev/null; then
+  HANDOFF_LOG_WHY="that path could not be appended to"
+  if _handoff_log_usable && { printf '%s baton: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$HANDOFF_LOG"; } 2>/dev/null; then
     return 0
   fi
-  [ -n "$HANDOFF_LOG_BROKEN" ] && return 0
   HANDOFF_LOG_BROKEN=1
-  echo "baton: WARNING -- the handoff log $HANDOFF_LOG could not be written, so this run's instructions were NOT recorded anywhere. Fix that path to get them back. (Shown once.)" >&2
+  echo "baton: WARNING -- this line could not be written to the handoff log $HANDOFF_LOG ($HANDOFF_LOG_WHY), so this one line is lost. Later lines may still land there once that path is fixed. Check account status for the current state. (Shown once.)" >&2
   return 0
 }
 
