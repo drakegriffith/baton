@@ -87,7 +87,7 @@ fi
 scenario_check "inspected more than zero handoff-log lines (got $log_lines)" \
   $([ "$log_lines" -gt 0 ]; echo $?)
 
-count_log() { local n; n=$(grep -cE "$1" "$HANDOFF_LOG_PATH" 2>/dev/null); printf '%s' "${n:-0}"; }
+count_log() { local n; n=$(grep -cE -- "$1" "$HANDOFF_LOG_PATH" 2>/dev/null); printf '%s' "${n:-0}"; }
 
 # Positive control: LAUNCHED lines are written at all. Without this, "no
 # LAUNCHED line for b" would pass on a build that stopped writing them.
@@ -106,6 +106,19 @@ scenario_check "the refused handoff left NO launch record for 'b' (got $launched
   $([ "$launched_b" -eq 0 ]; echo $?)
 scenario_check "no line claims the contested session was resumed" \
   $([ "$(count_log "LAUNCHED:.*$SID")" -eq 0 ]; echo $?)
+
+# --- the resume hint in that line is well-formed ---------------------------
+# The hint was spelled ${NIGHT_SESSION_ID:+--resume $NIGHT_SESSION_ID}${NIGHT_SESSION_ID:--c}.
+# `:-` substitutes the VARIABLE'S VALUE when it is set and only falls back to
+# the word when it is not, so a set session id was emitted TWICE and the log
+# read "--resume sess-a-01sess-a-01". The one line an operator would copy out
+# of the morning log to recover a session by hand named a session id that
+# does not exist. Asserted positively (the hint appears exactly once, spelled
+# correctly) before the doubling is asserted absent.
+scenario_check "the attempt line carries the resume hint exactly once (got $(count_log "--resume $SID"))" \
+  $([ "$(count_log "--resume $SID")" -eq 1 ]; echo $?)
+scenario_check "the session id is not doubled in the hint" \
+  $([ "$(count_log "$SID$SID")" -eq 0 ]; echo $?)
 
 # The log is still not a place commands get printed FROM -- it is allowed to
 # carry them, the streams are not. Re-asserted here because this commit adds

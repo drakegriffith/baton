@@ -317,7 +317,7 @@ EOF
 # handoff, carrying forward --resume/-c) until either the child exits on its
 # own, every account is exhausted, or BATON_MAX_HANDOFFS is hit.
 night_mode() {
-  local handoffs=0 resume_mode="" acct prev max_handoffs
+  local handoffs=0 resume_mode="" resume_hint="" acct prev max_handoffs
   night_knobs
   max_handoffs="$NIGHT_MAX_HANDOFFS"
 
@@ -357,10 +357,26 @@ night_mode() {
         acct="$PICKED"
         handoffs=$((handoffs + 1))
         warn "handoff: account '$prev' is unavailable ($NIGHT_CLASS); switching to account '$acct'"
+        # One branch decides BOTH what run_watched is told to do and what the
+        # log says it will do, so the two cannot disagree. They used to be
+        # written twice: this if/else for resume_mode, and a separate
+        # ${NIGHT_SESSION_ID:+--resume $NIGHT_SESSION_ID}${NIGHT_SESSION_ID:--c}
+        # inside the log line. That second spelling was wrong. `:-` falls back
+        # to its word only when the variable is unset OR EMPTY, and otherwise
+        # substitutes THE VALUE -- so a set session id was emitted twice and
+        # the log read "--resume sess-a-01sess-a-01". The empty case (`-c`)
+        # was correct, which is why nothing caught it: the branch that worked
+        # is the branch that ran in most scenarios.
+        #
+        # It matters because this is the ONE line an operator copies out of a
+        # morning log to recover a session by hand, and it named a session id
+        # that does not exist.
         if [ -n "$NIGHT_SESSION_ID" ]; then
           resume_mode="resume:$NIGHT_SESSION_ID"
+          resume_hint="--resume $NIGHT_SESSION_ID"
         else
           resume_mode="continue"
+          resume_hint="-c"
         fi
         # The morning record. It names the session id, which makes it the one
         # place holding a command the operator could actually re-run by hand
@@ -371,7 +387,7 @@ night_mode() {
         # so it is precisely the case that can be refused. The loop's next
         # iteration calls run_watched, and run_watched appends LAUNCHED only
         # if the resume actually happened.
-        handoff_log "ATTEMPT: handoff -- '$prev' unavailable ($NIGHT_CLASS); will resume under '$acct' with ${NIGHT_SESSION_ID:+--resume $NIGHT_SESSION_ID}${NIGHT_SESSION_ID:--c}"
+        handoff_log "ATTEMPT: handoff -- '$prev' unavailable ($NIGHT_CLASS); will resume under '$acct' with $resume_hint"
         ;;
     esac
   done
