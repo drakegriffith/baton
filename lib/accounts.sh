@@ -90,6 +90,36 @@ handoff_log() {
   return 0
 }
 
+# handoff_log_quoted LABEL TEXT -- record text baton did not write itself
+# (a probe's own output) in the handoff log, as QUOTED DATA.
+#
+# Three properties, each of which was a bug somewhere:
+#   - every line is prefixed `| `, so no line of the log is a line someone
+#     can select and run; the timestamp already prevents that, and this makes
+#     it visible rather than incidental;
+#   - the label says out loud that the quoted text is not an instruction,
+#     because the reader of a handoff log at 8am is reading a file whose
+#     entire purpose is to tell them what to type;
+#   - it is BOUNDED. Probe output is whatever the CLI printed, which on a
+#     captive-portal network is an HTML page. An unbounded quote would let a
+#     foreign response set the size of baton's durable log.
+HANDOFF_QUOTE_MAX_LINES=20
+HANDOFF_QUOTE_MAX_COLS=500
+handoff_log_quoted() {
+  local label="$1" text="$2" line n=0
+  handoff_log "$label. Its own output follows, quoted as data -- do not run it:"
+  while IFS= read -r line; do
+    n=$((n + 1))
+    if [ "$n" -gt "$HANDOFF_QUOTE_MAX_LINES" ]; then
+      handoff_log "  | ... truncated after $HANDOFF_QUOTE_MAX_LINES lines"
+      break
+    fi
+    handoff_log "  | ${line:0:$HANDOFF_QUOTE_MAX_COLS}"
+  done <<EOF
+$text
+EOF
+}
+
 # is_uint / is_unum -- the numeric SHAPE predicates. is_uint is a whole
 # number (durations, handoff counts); is_unum also allows one decimal point
 # (second counts like 0.2). Both refuse the empty string, a leading -, and
@@ -274,7 +304,20 @@ pick_live() {
       # command.
       AUTH)    warn "'$a' is NOT LOGGED IN; skipping 1h. How to fix it: $HANDOFF_LOG"
                handoff_log "account '$a' is not logged in. To fix it, run:  baton $a   then /login" ;;
-      UNKNOWN) warn "unrecognized probe result for '$a' (network?); launching anyway: ${PROBE_OUT:0:120}"
+      # The probe's own words never reach a shared stream. This branch used to
+      # `warn` the first 120 characters of $PROBE_OUT verbatim, which is a
+      # strictly worse version of the AUTH bug above: baton's own strings are
+      # a closed set a reviewer can read end to end, and probe output is an
+      # OPEN set -- proxy error pages, shell fragments, and (reproduced in
+      # scenario 40) a complete `baton <account> --resume <id>` line. Text
+      # that came from somewhere else is DATA; relaying it into the terminal
+      # a human is working in is what turns data into an instruction, and
+      # that is the whole of issue #2 root cause 2.
+      #
+      # stderr gets fixed wording and a pointer. The log gets the words,
+      # quoted, so a network diagnosis is still possible in the morning.
+      UNKNOWN) warn "unrecognized probe result for '$a' (network?); launching anyway. The probe's own words are in $HANDOFF_LOG, not here."
+               handoff_log_quoted "unrecognized probe result for '$a'; launched it anyway" "$PROBE_OUT"
                PICKED="$a"; return 0 ;;
     esac
   done
