@@ -126,7 +126,52 @@ scenario_check "a log symlinked to /dev/null is refused out loud, not written si
 scenario_check "/dev/null was not replaced or unlinked" $([ -c /dev/null ]; echo $?)
 cleanup_root
 
-# --- claim 5: a FIFO does not hang the watcher's failover path -------------
+# --- claim 5: a swap BETWEEN two appends in one run is caught --------------
+# The pre-check runs once per call, so a path that was a regular file when
+# baton started can be a symlink by the time the next account is probed. The
+# fake claude's behavior file is sourced shell, which makes it the one place
+# a test can act at a precise point INSIDE a live baton process: this one
+# swaps the log while account b is being probed -- after a's instruction has
+# landed, before b's is written.
+fresh_root
+setup_cascade
+OUTSIDE2="$SCRATCH/swapped-to.log"
+: > "$OUTSIDE2"
+cat > "$(config_dir_of b)/.fake-behavior" <<EOF
+mv "\$ACCOUNTS_ROOT/.handoff.log" "\$ACCOUNTS_ROOT/.handoff.log.moved" 2>/dev/null
+ln -s "$OUTSIDE2" "\$ACCOUNTS_ROOT/.handoff.log" 2>/dev/null
+DEFAULT_STDOUT="Not logged in. Please run /login"
+EOF
+run_auth_cascade swap
+# Positive control: appends were working BEFORE the swap. Without it, "nothing
+# landed outside" is satisfied by a baton that never wrote anything at all.
+scenario_check "positive control: account a's instruction landed before the swap" \
+  $(grep -q "'a'" "$BATON_ACCOUNTS_ROOT/.handoff.log.moved" 2>/dev/null; echo $?)
+scenario_check "nothing landed outside the root after the swap (got $(wc -c < "$OUTSIDE2" | tr -d ' ') bytes)" \
+  $([ "$(wc -c < "$OUTSIDE2" | tr -d ' ')" -eq 0 ]; echo $?)
+scenario_check "the swap is reported once (got $(notice_count "$SCRATCH/swap.err"))" \
+  $([ "$(notice_count "$SCRATCH/swap.err")" -eq 1 ]; echo $?)
+scenario_check "the swap report leaks no raw shell error" \
+  $([ "$(raw_shell_errors "$SCRATCH/swap.err")" -eq 0 ]; echo $?)
+cleanup_root
+
+# --- claim 6: a root BATON creates is 0700 ---------------------------------
+# The previous round declined this half of the finding on the grounds that
+# baton does not create the accounts root. It does: `mkdir -p "$ROOT"` runs at
+# startup, before any dispatch. The decline was wrong and the ruling is taken.
+# The other half stands and is asserted above: an EXISTING root's mode is
+# never changed, because re-permissioning a directory the operator made is a
+# side effect, not a fix.
+fresh_root
+NEWROOT="$SCRATCH/made-by-baton/accounts"
+BATON_ACCOUNTS_ROOT="$NEWROOT" "$BATON_BIN" --status >/dev/null 2>&1
+scenario_check "positive control: baton created the missing accounts root" \
+  $([ -d "$NEWROOT" ]; echo $?)
+scenario_check "a root baton created is mode 700 (got $(stat -f %Lp "$NEWROOT" 2>/dev/null))" \
+  $([ "$(stat -f %Lp "$NEWROOT" 2>/dev/null)" = "700" ]; echo $?)
+cleanup_root
+
+# --- claim 7: a FIFO does not hang the watcher's failover path -------------
 fresh_root
 setup_cascade
 mkfifo "$BATON_ACCOUNTS_ROOT/.handoff.log"

@@ -141,15 +141,54 @@ _handoff_log_usable() {
   return 1
 }
 
+# _handoff_log_ident -- the path's identity as LSTAT sees it (device:inode),
+# empty when it cannot be read. BSD `stat` does not follow symlinks without
+# -L, which is exactly the semantics needed here: a link swapped in must read
+# as a different file, not as its target.
+_handoff_log_ident() { stat -f '%d:%i' "$HANDOFF_LOG" 2>/dev/null; }
+
+# _handoff_log_same_file BEFORE -- true when the path still names the file it
+# named at BEFORE, and that file is still a regular non-symlink.
+#
+# DETECT, NOT PREVENT, and that distinction is the whole reason this exists.
+# _handoff_log_usable checks the path and `>>` then opens it; those are two
+# syscalls with a window between them, and a symlink dropped into that window
+# is followed no matter how carefully the check was written. The real fix is
+# to open with O_NOFOLLOW, and BASH CANNOT DO THAT -- no redirection
+# operator, no `exec` flag, no builtin opens without following. So the window
+# stays open and is closed after the fact instead: once the line has been
+# written, ask whether the path still names the same file. If it does not,
+# the line went somewhere baton never checked, and that is reported rather
+# than assumed benign.
+#
+# An empty BEFORE means the identity was never read, and that answers 1, not
+# 0: a check that inspected nothing must not report clean.
+_handoff_log_same_file() {
+  local before="${1-}" now
+  [ -n "$before" ] || return 1
+  [ -L "$HANDOFF_LOG" ] && return 1
+  [ -f "$HANDOFF_LOG" ] || return 1
+  now=$(_handoff_log_ident)
+  [ -n "$now" ] && [ "$now" = "$before" ]
+}
+
 handoff_log() {
   # Once refused, stay refused and stay quiet: the caller is a loop over
   # accounts, and re-testing (or re-reporting) per iteration would rebuild
   # the cascade this whole change removed.
   [ -n "$HANDOFF_LOG_BROKEN" ] && return 0
-  mkdir -p "$ROOT" 2>/dev/null
+  # A root baton creates is 0700: it holds every account's config dir, and
+  # the 0755 the common 022 umask gives lists them to anyone on the box.
+  # Creation only -- an existing root's mode belongs to the operator.
+  ( umask 077; mkdir -p "$ROOT" ) 2>/dev/null
   HANDOFF_LOG_WHY="that path could not be appended to"
-  if _handoff_log_usable && { printf '%s baton: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$HANDOFF_LOG"; } 2>/dev/null; then
-    return 0
+  local ident_before=""
+  if _handoff_log_usable; then
+    ident_before=$(_handoff_log_ident)
+    if { printf '%s baton: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$HANDOFF_LOG"; } 2>/dev/null; then
+      _handoff_log_same_file "$ident_before" && return 0
+      HANDOFF_LOG_WHY="that path stopped naming the same file while the line was being written, so it went somewhere unchecked"
+    fi
   fi
   HANDOFF_LOG_BROKEN=1
   echo "baton: WARNING -- this line could not be written to the handoff log $HANDOFF_LOG ($HANDOFF_LOG_WHY), so this one line is lost. Later lines may still land there once that path is fixed. Check account status for the current state. (Shown once.)" >&2
