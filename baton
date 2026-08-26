@@ -185,6 +185,7 @@ case "${1:-}" in
   --add)
     name="${2:-}"; [ -n "$name" ] || die "--add <name>"
     [ -e "$ROOT/$name" ] && die "account '$name' already exists"
+    [ -d "$HOME/.claude" ] || die "--add needs your primary ~/.claude to symlink from; run claude once (or mkdir -p ~/.claude) first"
     mkdir -p "$ROOT/$name"
     for f in $LINKS; do
       [ -e "$HOME/.claude/$f" ] && ln -sfn "$HOME/.claude/$f" "$ROOT/$name/$f"

@@ -23,14 +23,12 @@ moves the baton between subscriptions you already pay for.
 
 ```sh
 git clone https://github.com/drakegriffith/baton
-cd baton && cp baton lib -R /usr/local/lib/baton 2>/dev/null || true
-# or put the checkout on PATH:
-ln -s "$PWD/baton" /usr/local/bin/baton
+cd baton && mkdir -p ~/.local/bin && ln -s "$PWD/baton" ~/.local/bin/baton
 ```
 
-Requires: bash 3.2+ (macOS default works), python3, the `claude` CLI.
-`lib/` must sit beside the `baton` script (symlinking the script is fine; it
-resolves its own path).
+Make sure ~/.local/bin is on your PATH. Requires: bash 3.2+ (macOS default
+works), python3, the `claude` CLI. `lib/` must sit beside the `baton` script
+(symlinking the script is fine; it resolves its own path).
 
 ## Setup
 
