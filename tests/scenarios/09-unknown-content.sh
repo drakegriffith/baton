@@ -28,7 +28,13 @@ sleep 1.5
 
 scenario_check "child not killed" $(! [ -s "$(signals_log_of a)" ]; echo $?)
 scenario_check "a not marked dead" $(! is_dead_marked a; echo $?)
-scenario_check "no handoff/crash text on stderr yet" $(! grep -qi "handoff\|no live account" "$SCRATCH/night.err"; echo $?)
+# "handoff:" with the colon, not bare "handoff": since issue #2 the AUTH
+# branch names the handoff LOG path on stderr, so a bare "handoff" also
+# matches a run that merely mentioned where instructions went. This fixture
+# never reaches AUTH, so the loose grep passes today -- but it would then be
+# asserting something other than what it says. The announcement this line is
+# actually about is "baton: handoff: account ... switching to ...".
+scenario_check "no handoff/crash text on stderr yet" $(! grep -qi "handoff:\|no live account" "$SCRATCH/night.err"; echo $?)
 scenario_check "night still running" $(kill -0 "$NIGHT_PID" 2>/dev/null; echo $?)
 
 # STEP_BLOCK_TICKS=20 (2s) makes the fake claude for "a" exit(0) on its own,

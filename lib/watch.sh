@@ -3,9 +3,16 @@
 # (classify_text, for both the live-transcript and post-exit-probe paths)
 # and on accounts' public surface only (pick_live/candidates_exist,
 # mark_dead_for_class, probe, set_envargs, bump, die_no_live_account,
-# is_uint/is_unum) -- never on accounts'
+# handoff_log, is_uint/is_unum) -- never on accounts'
 # private state files directly, and never a second copy of the LIMIT/AUTH
 # regex family.
+#
+# Output rule (issue #2): run_watched backgrounds `claude` WITHOUT
+# redirecting it, so the child inherits this process's stdout and stderr --
+# the watcher and a full-screen TUI share one terminal for the whole night.
+# Anything printed here is therefore printed into a terminal a human is
+# using. Nothing in this file may write a runnable command to a stream; the
+# durable record goes through accounts.sh's handoff_log().
 #
 # Forbidden dependency (see QA-DOC section 4 rule 4 and the dependency
 # scenario in tests/scenarios): watch's only filesystem reads are transcript
@@ -205,10 +212,74 @@ run_watched() {
     continue) resume_args=(-c) ;;
   esac
 
+  # What the log will call this launch. Computed BEFORE the fork, because the
+  # two refusals below have to name it and neither of them will have a child.
+  local what
+  case "$resume_mode" in
+    resume:*) what="resumed session ${resume_mode#resume:} under account '$name'" ;;
+    continue) what="continued the last session under account '$name'" ;;
+    *)        what="account '$name'" ;;
+  esac
+
+  # POSITIVE CONTROL ON THE PROCESS TABLE, before anything is forked.
+  #
+  # Everything this function does after the fork depends on `ps` being able to
+  # answer questions: the start-up liveness check, the fingerprint on the
+  # receipt, the pid-reuse guard that reads it back. A `ps` that is denied,
+  # missing, or broken answers a question about a live child exactly like a
+  # `ps` reporting an absent one -- empty output, nonzero exit -- so the
+  # watcher concluded "gone", fell through to a blocking wait, and watched no
+  # transcripts for the rest of the night. The limit line that triggers a
+  # handoff would never be seen and the run would look like a clean session.
+  #
+  # lib/runs.sh has carried the control since baton#3: pid 1 exists on every
+  # machine this runs on, so a `ps` that cannot describe it is not answering
+  # questions at all. The watcher simply never called it.
+  #
+  # Exit 2, not die's 1, and before the fork rather than after: a watcher that
+  # cannot watch must not start a child it would immediately lose track of.
+  # "Could not inspect" is not a failure of the run, it is a refusal to guess.
+  _runs_ps_usable || {
+    echo "baton: watch-result=could-not-inspect reason=process-table-unreadable -- ps cannot describe pid 1, so a child could not be watched or even confirmed to exist. Nothing was launched. This exit 2 belongs to the watcher, not to a child." >&2
+    exit 2
+  }
+
+  # PREFLIGHT THE EXECUTABLE, before the fork, because after a successful exec
+  # the question is unanswerable.
+  #
+  # The previous round asked it afterwards, from the child's exit code: 126 or
+  # 127 meant "the exec failed". That premise is false, and this repo's own
+  # fixture is the counterexample -- tests/fixtures/bin/claude runs perfectly
+  # well and returns 127 because a behavior file told it to, and a real CLI
+  # may do the same. An exit code is application status. It cannot say whether
+  # the application ever started.
+  #
+  # Before the fork it is a plain question with a plain answer: does the name
+  # resolve on PATH, and is what it resolves to executable. `command -v`
+  # already requires executability, and the explicit -x is kept for the window
+  # between resolving and forking. ENVARGS only ever sets or unsets
+  # CLAUDE_CONFIG_DIR, never PATH, so the parent resolves the same binary the
+  # child would.
+  #
+  # The resolved path is then USED, not re-resolved. The exec line used to run
+  # the bare name again, which made preflight and launch two separate lookups
+  # of the same word at two different moments -- a PATH edit, a chmod, or a
+  # replaced file between them passes the check and fails the exec, after the
+  # fork, where the exit code can no longer answer the question (see below).
+  # One resolution, used twice. `-f` rejects a directory outright; measured
+  # note, `command -v` already skips directories on this bash, so -f is the
+  # belt for a path that becomes one between the lookup and the fork.
+  local claude_bin
+  claude_bin=$(command -v claude 2>/dev/null)
+  if [ -z "$claude_bin" ] || [ ! -f "$claude_bin" ] || [ ! -x "$claude_bin" ]; then
+    handoff_log "LAUNCH FAILED: $what -- the claude executable does not resolve on PATH, so no child was started and no unit was opened"
+    die "cannot launch '$name': no executable file 'claude' on PATH"
+  fi
+
   if [ "${#resume_args[@]}" -gt 0 ]; then
-    "${ENVARGS[@]}" claude "${resume_args[@]}" "$@" &
+    "${ENVARGS[@]}" "$claude_bin" "${resume_args[@]}" "$@" &
   else
-    "${ENVARGS[@]}" claude "$@" &
+    "${ENVARGS[@]}" "$claude_bin" "$@" &
   fi
   local pid=$!
 
@@ -219,10 +290,82 @@ run_watched() {
   # started. The two mktemp files above are still scratch and still deleted;
   # these are not.
   local unit="night-$(date -u +%Y%m%dT%H%M%SZ)-$$-$name"
-  runs_record_start "$unit" "$pid" "$(runs_fingerprint "$pid")" "claude ${resume_args[*]-} $*"
+  local receipt_ok=1
+  runs_record_start "$unit" "$pid" "$(runs_fingerprint "$pid")" "$claude_bin ${resume_args[*]-} $*" \
+    || receipt_ok=0
 
   local interval="$NIGHT_INTERVAL"
   local cursors="" f size offset class line
+
+  # Did the child actually START? `cmd &` hands back a pid whatever happens
+  # next: if the exec fails -- binary missing, or present and not executable
+  # -- the child exits 126/127 immediately and nothing ever ran, but the fork
+  # already succeeded and the pid already exists. Writing LAUNCHED off the
+  # back of that records that BASH MANAGED TO FORK, which is not the claim
+  # the line makes.
+  #
+  # So the child is given one watch tick to still be there. `ps -o state=`
+  # rather than `kill -0`, because a child that has exited but not yet been
+  # reaped is a ZOMBIE and kill -0 SUCCEEDS on a zombie -- the exact case
+  # being tested for would read as alive.
+  #
+  # The status is captured here rather than re-waited later: `wait` on an
+  # already-reaped pid returns 127, which would overwrite a child's real exit
+  # code with a fake one on its way to NIGHT_EXIT_CODE.
+  sleep "$interval"
+  local launch_code="" state ps_rc
+  state=$(ps -p "$pid" -o state= 2>/dev/null); ps_rc=$?
+  state=$(printf '%s' "$state" | tr -d ' \n')
+  # The control has to be about THIS SUBJECT, not about `ps` in general. A ps
+  # can answer for pid 1 and refuse everything else -- a sandbox that permits
+  # init, a container with a restricted /proc view, a visibility policy. The
+  # pre-fork control passes, the child-specific call comes back empty, and
+  # empty reads as "the child is gone": a blocking wait, and no transcript
+  # watching for the rest of the night, so the limit line that triggers a
+  # handoff is never seen.
+  #
+  # `kill -0` is the second opinion, and it is a good one here precisely
+  # because this process FORKED that pid -- it is a signal-permission question
+  # answered by the kernel, not another read of the same table. When the two
+  # disagree -- ps says nothing, kill -0 says the pid is there -- that is
+  # could-not-inspect. It is never "dead".
+  if { [ "$ps_rc" -ne 0 ] || [ -z "$state" ]; } && kill -0 "$pid" 2>/dev/null; then
+    echo "baton: watch-result=could-not-inspect reason=child-liveness-unreadable -- ps gave no answer for the child just started, but the pid is still signalable, so its liveness cannot be established and its transcript cannot be watched. The child is still running and unit $unit records it. This exit 2 belongs to the watcher, not to a child." >&2
+    exit 2
+  fi
+  case "$state" in
+    ''|Z*) wait "$pid" 2>/dev/null; launch_code=$? ;;
+  esac
+
+  # The handoff log's launch record is written HERE and only here: the first
+  # point where the session lock is held (or was never needed), the receipt
+  # lib/runs.sh reads back at restart is on disk, and a child has actually
+  # been observed.
+  #
+  # It used to be written by night_mode BEFORE calling this function, which
+  # put it before the lock claim above. A refused resume dies up there, so the
+  # log was left asserting a launch that never happened -- in the one durable
+  # record of the night, read hours later by someone who cannot see the
+  # terminal, and in the file that makes a refusal (the guard WORKING)
+  # indistinguishable from a child that started and vanished. night_mode still
+  # logs what it is about to try; the difference is a tense.
+  if [ "$receipt_ok" -eq 0 ]; then
+    # No receipt means no durable evidence this child exists, so there is
+    # nothing to point a restart at and no launch to claim. Same rule as the
+    # lock: the record follows the evidence, never the intention.
+    handoff_log "LAUNCH FAILED: $what -- the launch receipt for unit $unit could not be written, so nothing durable records this child"
+    warn "the launch receipt for '$name' could not be written; see $HANDOFF_LOG"
+  elif [ -n "$launch_code" ]; then
+    # It exec'd and has already finished: a headless child that did its work,
+    # one that hit its limit on the first call, or one that failed on its own
+    # terms. All three ARE launches. The exit code is recorded as what it is
+    # -- application status -- and never re-read as evidence about whether the
+    # program started, which is the mistake the preflight above now prevents
+    # from ever needing to be made.
+    handoff_log "LAUNCHED: $what as unit $unit (pid $pid); already exited $launch_code before the first watch tick"
+  else
+    handoff_log "LAUNCHED: $what as unit $unit (pid $pid)"
+  fi
 
   while kill -0 "$pid" 2>/dev/null; do
     sleep "$interval"
@@ -265,8 +408,17 @@ EOF
   done
 
   rm -f "$ref" "$snap"
-  wait "$pid"
-  local code=$?
+  # A child reaped by the start-up liveness check above must NOT be waited on
+  # again: `wait` on an already-reaped pid answers 127, and that fake code
+  # would flow straight into runs_record_complete and NIGHT_EXIT_CODE, so a
+  # clean headless exit would read as "command not found".
+  local code
+  if [ -n "$launch_code" ]; then
+    code="$launch_code"
+  else
+    wait "$pid"
+    code=$?
+  fi
   # The completion receipt is written from the code wait() actually returned,
   # before anything else can fail. It is the only evidence that closes a unit,
   # so it is never written from an assumption about how the child ended.
@@ -292,7 +444,7 @@ EOF
 # handoff, carrying forward --resume/-c) until either the child exits on its
 # own, every account is exhausted, or BATON_MAX_HANDOFFS is hit.
 night_mode() {
-  local handoffs=0 resume_mode="" acct prev max_handoffs
+  local handoffs=0 resume_mode="" resume_hint="" acct prev max_handoffs
   night_knobs
   max_handoffs="$NIGHT_MAX_HANDOFFS"
 
@@ -302,6 +454,11 @@ night_mode() {
   while true; do
     bump "$acct"
     warn "launching as account '$acct' (night mode)"
+    # ATTEMPT, not "launching": run_watched can still refuse below (the
+    # single-writer guard) and die without ever reaching the CLI. The
+    # matching LAUNCHED line is appended by run_watched once the lock is held
+    # and the receipt exists.
+    handoff_log "ATTEMPT: launch as account '$acct' (night mode)${resume_mode:+, $resume_mode}"
     run_watched "$acct" "$resume_mode" "$@"
 
     case "$NIGHT_RESULT" in
@@ -327,11 +484,37 @@ night_mode() {
         acct="$PICKED"
         handoffs=$((handoffs + 1))
         warn "handoff: account '$prev' is unavailable ($NIGHT_CLASS); switching to account '$acct'"
+        # One branch decides BOTH what run_watched is told to do and what the
+        # log says it will do, so the two cannot disagree. They used to be
+        # written twice: this if/else for resume_mode, and a separate
+        # ${NIGHT_SESSION_ID:+--resume $NIGHT_SESSION_ID}${NIGHT_SESSION_ID:--c}
+        # inside the log line. That second spelling was wrong. `:-` falls back
+        # to its word only when the variable is unset OR EMPTY, and otherwise
+        # substitutes THE VALUE -- so a set session id was emitted twice and
+        # the log read "--resume sess-a-01sess-a-01". The empty case (`-c`)
+        # was correct, which is why nothing caught it: the branch that worked
+        # is the branch that ran in most scenarios.
+        #
+        # It matters because this is the ONE line an operator copies out of a
+        # morning log to recover a session by hand, and it named a session id
+        # that does not exist.
         if [ -n "$NIGHT_SESSION_ID" ]; then
           resume_mode="resume:$NIGHT_SESSION_ID"
+          resume_hint="--resume $NIGHT_SESSION_ID"
         else
           resume_mode="continue"
+          resume_hint="-c"
         fi
+        # The morning record. It names the session id, which makes it the one
+        # place holding a command the operator could actually re-run by hand
+        # -- which is exactly why it is written here and not printed.
+        #
+        # Stated as an ATTEMPT for the same reason as the launch line above:
+        # the resume this describes is the one that takes the session lock,
+        # so it is precisely the case that can be refused. The loop's next
+        # iteration calls run_watched, and run_watched appends LAUNCHED only
+        # if the resume actually happened.
+        handoff_log "ATTEMPT: handoff -- '$prev' unavailable ($NIGHT_CLASS); will resume under '$acct' with $resume_hint"
         ;;
     esac
   done

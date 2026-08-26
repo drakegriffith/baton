@@ -19,7 +19,25 @@ start_night
 wait_for_night_exit 10
 scenario_check "night process exited" $?
 scenario_check "exit nonzero" $([ "$NIGHT_EXIT" -ne 0 ]; echo $?)
-scenario_check "existing no-live-account message on stderr" $(grep -q "no live account under .*baton --status to see dead marks; baton --revive <name> to override" "$SCRATCH/night.err"; echo $?)
+scenario_check "existing no-live-account message on stderr" $(grep -q "no live account under " "$SCRATCH/night.err"; echo $?)
+# This row used to pin the message's exact tail: "baton --status to see dead
+# marks; baton --revive <name> to override". That is two runnable command
+# lines on a stream the operator and the `claude` child share -- issue #2
+# root cause 2, on the exact path an exhausted night ends on -- so the test
+# was pinning the bug. The message now names the recovery as a noun and a
+# knob; the commands themselves go to the handoff log. The Gherkin row's
+# actual requirement (name BATON_ACCOUNTS_ROOT and --revive) is unchanged
+# and still asserted, here and below.
+scenario_check "the exhaustion message still names the --revive knob" \
+  $(grep -q -- "--revive" "$SCRATCH/night.err"; echo $?)
+scenario_check "positive control: the predicate about to be used can see a leak" \
+  $([ "$(predicate_positive_control "$SCRATCH/predicate-control.txt")" -eq 3 ]; echo $?)
+scenario_check "positive control: stderr held more than zero lines to inspect" \
+  $([ "$(stream_lines "$SCRATCH/night.err")" -gt 0 ]; echo $?)
+scenario_check "the exhaustion message hands over no runnable baton command line" \
+  $([ "$(runnable_command_lines "$SCRATCH/night.err")" -eq 0 ]; echo $?)
+scenario_check "the exact recovery commands are in the handoff log instead" \
+  $(grep -q "baton --revive <name>" "$BATON_ACCOUNTS_ROOT/.handoff.log" 2>/dev/null; echo $?)
 # The Gherkin requires this message name BATON_ACCOUNTS_ROOT, and it means
 # the ROOT ACTUALLY IN USE, not just the string "BATON_ACCOUNTS_ROOT":
 # read out of an unattended log, "no live account" alone cannot be told

@@ -16,6 +16,34 @@ using runs out mid-session. `baton` handles both:
   next live account with `--resume`. The work keeps going; you read the
   handoff log in the morning.
 
+### Where instructions go
+
+`~/.claude-accounts/.handoff.log` is the handoff log. Every instruction
+baton produces *on its own initiative* -- account handoffs, and the
+"this account needs `/login`" line the liveness probe emits per dead
+account -- is appended there with a timestamp, and is not printed.
+
+One deliberate exception, stated because the rule above would otherwise be
+false: `baton --add <name>` prints its `baton <name>` / `/login` follow-up
+straight to stdout. That line is a synchronous answer to a command you just
+typed yourself, for one named account, and it cannot arrive three at a time
+while you are looking elsewhere -- the multiplication that caused the
+incident is absent. The rule is about unprompted output, not about every
+`/login` string in the program.
+
+Instructions are deliberately **never printed unsolicited** to stdout or stderr. Under `--night`
+the watcher and its `claude` child share one terminal, so a printed command
+lands in the terminal you are working in -- and when several accounts fail
+at once, several runnable commands appear at once. That is how a session got
+lost on 2026-08-25 (issue #2): the same command shape showed up twice, both
+were run, and two processes attached to one session through the shared
+`projects/` symlink. The terminal now tells you *that* an account is out and
+points at the log; the log tells you *what to type*.
+
+```sh
+tail ~/.claude-accounts/.handoff.log
+```
+
 Each account's limits are fully enforced by Anthropic per account; baton just
 moves the baton between subscriptions you already pay for.
 

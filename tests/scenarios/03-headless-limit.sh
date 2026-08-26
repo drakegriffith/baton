@@ -25,5 +25,17 @@ scenario_check "baton relaunched under b" $(grep -q "config=$(config_dir_of b) "
 scenario_check "exactly 2 invocations for a (launch + post-exit probe)" $([ "$(invocation_count a)" -eq 2 ]; echo $?)
 scenario_check "run did not exit with child's own exit code (3)" $([ "$NIGHT_EXIT" -ne 3 ]; echo $?)
 
+# The OTHER half of the handoff line's resume hint. This rotation is driven
+# by the post-exit probe, not by a transcript line, so there is no session id
+# and the hint must be a bare `-c`. It is asserted here because this is the
+# only scenario that reaches that branch; its partner, the `--resume <id>`
+# branch, is asserted in scenario 41, where the id doubling was found --
+# ${VAR:+--resume $VAR}${VAR:--c} emits a SET value twice, because `:-`
+# falls back to the word only when the variable is unset or empty.
+HANDOFF_LOG_PATH="$BATON_ACCOUNTS_ROOT/.handoff.log"
+handoff_hint=$(grep -c -- 'will resume under .* with -c$' "$HANDOFF_LOG_PATH" 2>/dev/null)
+scenario_check "the sessionless handoff logs a bare -c hint (got ${handoff_hint:-0})" \
+  $([ "${handoff_hint:-0}" -ge 1 ]; echo $?)
+
 cleanup_root
 scenario_end

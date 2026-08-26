@@ -197,3 +197,74 @@ stop_night() {
 is_dead_marked() { [ -f "$BATON_ACCOUNTS_ROOT/.dead/$1" ]; }
 dead_epoch_of() { awk '{print $1}' "$BATON_ACCOUNTS_ROOT/.dead/$1" 2>/dev/null; }
 dead_reason_of() { awk '{print $2}' "$BATON_ACCOUNTS_ROOT/.dead/$1" 2>/dev/null; }
+
+# --- the runnable-command predicate (issue #2 root cause 2) ----------------
+#
+# ONE definition, shared by every scenario that asserts "no command line
+# reached a shared stream", for the same reason lib/detect.sh holds one copy
+# of the classification regexes: two copies drift, and the copy that drifts
+# is the one that stops catching things. Scenario 29 shipped with a predicate
+# spelled 'run: baton |baton [A-Za-z0-9_-]+ +then /login' -- it recognised
+# only the ONE sentence pick_live's AUTH branch used to print, so
+# `baton a --resume abc123` (the exact shape the 2026-08-25 incident put in
+# Drake's terminal) passed the test that claims to forbid it, and so did the
+# double-spaced "run:  baton a   then /login" that handoff_log actually
+# writes.
+#
+# What "runnable" means here: the token `baton` at a word boundary, followed
+# by whitespace and then an account name or a flag. That is a command a human
+# can select and press enter on. Deliberate non-matches, weighed rather than
+# missed: `baton:` (the warn/die prefix on every operator-facing line) is not
+# followed by whitespace, and a path component like `baton-watch-ref` has no
+# whitespace after the token either.
+#
+# Whitespace is normalised BEFORE matching, because the leak is about what a
+# human can paste, and "baton   a" pastes exactly as well as "baton a".
+RUNNABLE_BATON_RE='(^|[^-./[:alnum:]_])baton +[-A-Za-z0-9_]'
+
+# normalise_stream -- stdin with every run of whitespace squashed to one
+# space and the ends trimmed. Line structure is preserved (a whole-file
+# `tr -s` would join every line into one and make a per-line count
+# meaningless).
+normalise_stream() {
+  LC_ALL=C sed -e 's/[[:space:]][[:space:]]*/ /g' -e 's/^ *//' -e 's/ *$//'
+}
+
+# runnable_command_lines FILE -- lines of FILE carrying a runnable baton
+# command, after normalisation. A missing file counts 0.
+#
+# `grep -c` PRINTS its count (even 0) but EXITS nonzero on zero matches, so
+# no `|| echo 0` here -- that would emit a second 0 and every later
+# `[ "$n" -eq 0 ]` would die on "0\n0" (tests/run.sh line 39, same trap).
+runnable_command_lines() {
+  local n
+  [ -f "${1:-}" ] || { printf '0'; return 0; }
+  n=$(normalise_stream < "$1" 2>/dev/null | grep -acE "$RUNNABLE_BATON_RE")
+  printf '%s' "${n:-0}"
+}
+
+# stream_lines FILE -- how many non-empty lines the predicate was applied to.
+# Absence is not evidence: a "no runnable command" check over zero lines
+# found nothing because it looked at nothing, so every caller asserts this is
+# greater than zero before believing the negative.
+stream_lines() {
+  local n
+  [ -f "${1:-}" ] || { printf '0'; return 0; }
+  n=$(normalise_stream < "$1" 2>/dev/null | grep -ac .)
+  printf '%s' "${n:-0}"
+}
+
+# predicate_positive_control -- proves the predicate is not simply blind.
+# Writes the three leak shapes that have actually mattered (the incident's
+# resume line, the AUTH line as handoff_log spells it with its double
+# spaces, and a bare relaunch) into a scratch file and returns the match
+# count, which every caller requires to equal 3.
+predicate_positive_control() {
+  local f="${1:?}"
+  {
+    printf 'baton a --resume abc123\n'
+    printf 'run:  baton a   then /login\n'
+    printf 'baton --revive b\n'
+  } > "$f"
+  runnable_command_lines "$f"
+}

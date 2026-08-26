@@ -149,7 +149,12 @@ need_lock() {
 # .claude.json stay per-account; everything else is one fleet.
 LINKS="CLAUDE.md MISSION.md settings.json settings.local.json skills hooks agents plugins projects state history.jsonl lib scripts bin agent-memory sessions tasks context-mode comms reminders"
 
-mkdir -p "$ROOT"
+# 0700, not the 0755 a 022 umask gives. This directory holds every account's
+# CLAUDE_CONFIG_DIR, so its listing is the fleet roster and its contents are
+# credential slots. Creation only: `mkdir -p` is a no-op on a root that
+# already exists, and baton never chmods one it did not make -- tightening a
+# directory the operator created is a side effect, not a fix.
+( umask 077; mkdir -p "$ROOT" )
 
 # The glob that defines "an account" lives in lib/accounts.sh with the two
 # functions that read the array (is_account, ranked), not here.

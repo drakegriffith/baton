@@ -30,7 +30,11 @@ scenario_check "the running process kept baton's own PID (exec, not fork)" $([ "
 scenario_check "its PPID is this test's own PID (no extra generation)" $([ "$child_ppid" = "$this_pid" ]; echo $?)
 scenario_check "baton exited with the child's exit code" $([ "$baton_exit" -eq 0 ]; echo $?)
 scenario_check "no sigterm/kill marker (no watching happened)" $(! [ -s "$(signals_log_of a)" ]; echo $?)
-scenario_check "no handoff-related output on stderr" $(! grep -qi "handoff\|night mode\|no live account" "$SCRATCH/stderr.log"; echo $?)
+# "handoff:" with the colon -- same note as scenario 09. Since issue #2 a
+# bare "handoff" also matches the handoff-LOG path the AUTH branch names on
+# stderr, which is not handoff-related output; it is a pointer to where
+# instructions were written instead of printed.
+scenario_check "no handoff-related output on stderr" $(! grep -qi "handoff:\|night mode\|no live account" "$SCRATCH/stderr.log"; echo $?)
 
 cleanup_root
 scenario_end
