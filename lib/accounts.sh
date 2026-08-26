@@ -5,7 +5,11 @@
 # reverse. Exposes the public surface `watch` is allowed to call: ranked(),
 # is_dead(), mark_dead(), mark_dead_for_class(), probe(), pick_live(),
 # set_envargs(), bump(), die_no_live_account(), is_uint(), is_unum(),
-# is_account(), enumerate_accounts(), candidates_exist(). Everything else here (tally
+# is_account(), enumerate_accounts(), candidates_exist(), handoff_log(),
+# handoff_log_quoted(). The last two are listed because watch.sh calls them
+# and the list is the contract: night_mode records what it is about to try
+# and run_watched records what actually launched, so the log is written from
+# both files by design, not by accident. Everything else here (tally
 # file format, dead-file format) is private and must stay that way --
 # watch.sh never opens these files directly.
 #

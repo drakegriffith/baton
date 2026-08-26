@@ -228,6 +228,24 @@ run_watched() {
   local unit="night-$(date -u +%Y%m%dT%H%M%SZ)-$$-$name"
   runs_record_start "$unit" "$pid" "$(runs_fingerprint "$pid")" "claude ${resume_args[*]-} $*"
 
+  # The handoff log's launch record is written HERE and only here, which is
+  # the first point in this function where all three things are true: the
+  # session lock is held (or was never needed), the child has a pid, and the
+  # receipt that lib/runs.sh will read back at restart exists.
+  #
+  # It used to be written by night_mode BEFORE calling this function, which
+  # put it before the lock claim a dozen lines above. A refused resume dies
+  # up there, so the log was left asserting a launch that never happened --
+  # in the one durable record of the night, read hours later by someone who
+  # cannot see the terminal, and in the file that makes a refusal (the guard
+  # WORKING) indistinguishable from a child that started and vanished.
+  # night_mode still logs what it is about to try; the difference is a tense.
+  case "$resume_mode" in
+    resume:*) handoff_log "LAUNCHED: resumed session ${resume_mode#resume:} under account '$name' as unit $unit (pid $pid)" ;;
+    continue) handoff_log "LAUNCHED: continued the last session under account '$name' as unit $unit (pid $pid)" ;;
+    *)        handoff_log "LAUNCHED: account '$name' as unit $unit (pid $pid)" ;;
+  esac
+
   local interval="$NIGHT_INTERVAL"
   local cursors="" f size offset class line
 
@@ -309,7 +327,11 @@ night_mode() {
   while true; do
     bump "$acct"
     warn "launching as account '$acct' (night mode)"
-    handoff_log "launching as account '$acct' (night mode)${resume_mode:+, $resume_mode}"
+    # ATTEMPT, not "launching": run_watched can still refuse below (the
+    # single-writer guard) and die without ever reaching the CLI. The
+    # matching LAUNCHED line is appended by run_watched once the lock is held
+    # and the receipt exists.
+    handoff_log "ATTEMPT: launch as account '$acct' (night mode)${resume_mode:+, $resume_mode}"
     run_watched "$acct" "$resume_mode" "$@"
 
     case "$NIGHT_RESULT" in
@@ -343,7 +365,13 @@ night_mode() {
         # The morning record. It names the session id, which makes it the one
         # place holding a command the operator could actually re-run by hand
         # -- which is exactly why it is written here and not printed.
-        handoff_log "handoff: '$prev' unavailable ($NIGHT_CLASS); resuming under '$acct' with ${NIGHT_SESSION_ID:+--resume $NIGHT_SESSION_ID}${NIGHT_SESSION_ID:--c}"
+        #
+        # Stated as an ATTEMPT for the same reason as the launch line above:
+        # the resume this describes is the one that takes the session lock,
+        # so it is precisely the case that can be refused. The loop's next
+        # iteration calls run_watched, and run_watched appends LAUNCHED only
+        # if the resume actually happened.
+        handoff_log "ATTEMPT: handoff -- '$prev' unavailable ($NIGHT_CLASS); will resume under '$acct' with ${NIGHT_SESSION_ID:+--resume $NIGHT_SESSION_ID}${NIGHT_SESSION_ID:--c}"
         ;;
     esac
   done
