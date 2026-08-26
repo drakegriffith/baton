@@ -1,0 +1,54 @@
+| id | file | function | prov | mutation | verdict | failing tests |
+| -- | ---- | -------- | ---- | -------- | ------- | ------------- |
+| M01 | lib/detect.sh | `classify_text` | NEW | reorder: AUTH tested before LIMIT (precedence flip) | killed | unit:classify_text:auth-phrase-first |
+| M02 | lib/detect.sh | `classify_text` | NEW | drop case-insensitivity from the LIMIT regex (-qiE -> -qE) | killed | unit:classify_text:multiline-json-line |
+| M03 | lib/detect.sh | `classify_text` | NEW | swap the total-partition fallback: UNKNOWN -> AUTH | killed | unit:classify_text:ordinary-chatter, unit:classify_text:empty-string, unit:classify_text:limit-word-not-alone, unit:classify_text:whitespace-only |
+| M04 | lib/detect.sh | `parse_reset_epoch` | SHARED | boundary flip: already-passed test `t <= nowt` -> `t >= nowt` | killed | unit:parse_reset_epoch:one-hour-ahead-is-today, unit:parse_reset_epoch:one-hour-past-rolls-to-tomorrow, unit:parse_reset_epoch:noon-boundary-1230pm, unit:parse_reset_epoch:midnight-boundary-1215am |
+| M05 | lib/detect.sh | `parse_reset_epoch` | SHARED | drop the roll-to-tomorrow step for an already-passed reset time | killed | unit:parse_reset_epoch:one-hour-past-rolls-to-tomorrow, unit:parse_reset_epoch:noon-boundary-1230pm, unit:parse_reset_epoch:midnight-boundary-1215am |
+| M06 | lib/detect.sh | `parse_reset_epoch` | SHARED | 12-hour wrap boundary: `% 12` -> `% 24` (breaks 12:xxpm/12:xxam) | killed | unit:parse_reset_epoch:noon-boundary-1230pm |
+| M07 | lib/accounts.sh | `parse_duration` | SHARED | unit swap: `5h` parsed as 5*60 instead of 5*3600 | killed | 02-reset-fallback, 15-adversarial-durations |
+| M08 | lib/accounts.sh | `parse_duration` | SHARED | drop the malformed-duration rejection (bad input reaches the arithmetic) | killed | 15-adversarial-durations |
+| M09 | lib/accounts.sh | `mark_dead_for_class` | NEW | operator flip: parsed reset accepted only when in the PAST (-gt -> -lt) | killed | 02-reset-fallback, 07-exhaustion, 20-parsed-reset-honored, 26-exhaustion-beats-cap |
+| M10 | lib/accounts.sh | `mark_dead_for_class` | NEW | AUTH dead duration 3600s -> 7200s | killed | 04-headless-auth-rotate |
+| M11 | lib/accounts.sh | `mark_dead` | SHARED | dropped step: a dead mark no longer invalidates the ALIVE cache entry | killed | 16-dead-mark-invalidates-alive-cache |
+| M12 | lib/accounts.sh | `ranked` | SHARED | ranking order reversed: `sort -n` -> `sort -rn` (busiest account first) | killed | 01-interactive-limit-headline, 02-reset-fallback, 03-headless-limit-rotate, 04-headless-auth-rotate |
+| M13 | lib/accounts.sh | `probe` | NEW | drop the canary check: any UNKNOWN probe reply is reported ALIVE | killed | 10-classification-contract-outline, 23-unknown-probe-launches-anyway |
+| M14 | lib/accounts.sh | `set_envargs` | NEW | swap the primary/non-primary branches (CONFIG_DIR + ENVARGS both) | killed | 01-interactive-limit-headline, 03-headless-limit-rotate, 04-headless-auth-rotate, 07-exhaustion |
+| M15 | lib/accounts.sh | `pick_live` | NEW | UNKNOWN probe result skips the account instead of launching anyway | killed | 23-unknown-probe-launches-anyway |
+| M16 | lib/accounts.sh | `alive_fresh` | SHARED | freshness comparison inverted (-lt -> -gt): cache never trusted | killed | 01-interactive-limit, 02-reset-fallback, 03-headless-limit-rotate, 06-nonzero-exit-no-rotation |
+| M17 | lib/accounts.sh | `bump` | SHARED | dropped step: last-used account no longer recorded | killed | 22-last-used-tracking |
+| M18 | lib/accounts.sh | `launch` | SHARED | exec -> fork+wait (plain baton grows an extra process generation) | killed | 11-plain-baton-execs, 12-existing-flags-outline, 23-unknown-probe-launches-anyway, 35-interactive-resume-is-single-writer |
+| M19 | lib/accounts.sh | `pick_live` | NEW | drop the BATON_EXCLUDE pass-through from ranked() | killed | 21-baton-exclude-regression |
+| M20 | lib/watch.sh | `launch_size` | NEW | pre-launch size reported as 0: a resumed transcript is re-read from byte 0 | killed | 25-resumed-session-growth |
+| M21 | lib/watch.sh | `run_watched` | NEW | session id blanked on a live-transcript rotation (forces -c instead of --resume) | killed | 01-interactive-limit-headline, 24-cwd-with-dot-in-name, 25-resumed-session-growth, 33-resume-and-login-are-single-writer |
+| M22 | lib/watch.sh | `run_watched` | NEW | post-exit probe: dropped condition, AUTH no longer rotates | killed | 04-headless-auth-rotate |
+| M23 | lib/watch.sh | `run_watched` | NEW | live transcript: dropped condition, AUTH line no longer kills the child | killed | 10-classification-contract-outline |
+| M24 | lib/watch.sh | `run_watched` | NEW | signal swap: SIGTERM -> SIGKILL (child loses its chance to clean up) | killed | 01-interactive-limit-headline, 10-classification-contract-outline, 24-cwd-with-dot-in-name, 25-resumed-session-growth |
+| M25 | lib/watch.sh | `transcript_dir_for` | NEW | slug rule: only `/` replaced, `.` left intact | killed | 24-cwd-with-dot-in-name |
+| M26 | lib/watch.sh | `night_mode` | NEW | handoff cap off-by-one (-gt -> -ge): cap N allows only N-1 handoffs | killed | 08-handoff-cap, 26-exhaustion-beats-cap |
+| M27 | lib/watch.sh | `night_mode` | NEW | handoff counter never incremented (cap unreachable) | killed | 08-handoff-cap |
+| M28 | lib/watch.sh | `night_mode` | NEW | exit-code swap: child's real code replaced by 0 | killed | 01-interactive-limit-headline, 06-nonzero-exit-no-rotation, 19-arg-passthrough, 25-resumed-session-growth |
+| M29 | lib/watch.sh | `night_mode` | NEW | resume-mode test inverted (-n -> -z): known session id forces -c | killed | 01-interactive-limit-headline, 24-cwd-with-dot-in-name, 25-resumed-session-growth, 33-resume-and-login-are-single-writer |
+| M30 | lib/watch.sh | `night_mode` | NEW | cap checked before exhaustion: the last account's limit is misreported as a cap hit | killed | 26-exhaustion-beats-cap |
+| M31 | lib/watch.sh | `run_watched` | NEW | growth test relaxed (-gt -> -ge): unchanged file re-read every poll | **SURVIVED** | - |
+| M32 | baton | `dispatch --probe` | SHARED | drop the account-exists guard on --probe | killed | 17-account-name-boundary |
+| M33 | baton | `dispatch --pick` | SHARED | --pick prints two candidates instead of one | killed | 12-existing-flags-outline, 21-baton-exclude-regression |
+| M34 | baton | `dispatch empty-accounts guard` | SHARED | empty-accounts guard condition flipped (-eq 0 -> -gt 0) | killed | 01-interactive-limit-headline, 02-reset-fallback, 03-headless-limit-rotate, 04-headless-auth-rotate |
+| M35 | baton | `dispatch --dead` | SHARED | drop the re-raise of parse_duration's die (subshell failure swallowed) | killed | 15-adversarial-durations |
+| M36 | baton | `dispatch --night` | NEW | --night no longer shifts its own flag off the claude args | killed | 19-arg-passthrough |
+| M37 | lib/accounts.sh | `die_no_live_account` | NEW | reword the exhaustion message the operator is told to act on (drops the accounts root) | killed | 07-exhaustion |
+| M38 | lib/accounts.sh | `auto_launch` | SHARED | drop the user's claude args on the plain launch path | killed | 16-dead-mark-invalidates-alive-cache, 19-arg-passthrough, 23-unknown-probe-launches-anyway, 35-interactive-resume-is-single-writer |
+| M39 | lib/accounts.sh | `is_dead` | SHARED | drop the empty-guard: a missing dead file reaches [ -gt ] as an empty string | killed | 12-existing-flags-outline |
+| M40 | lib/accounts.sh | `mark_dead_for_class` | NEW | ignore the parsed reset time: every LIMIT takes the 5h fallback | killed | 20-parsed-reset-honored |
+| M41 | lib/accounts.sh | `is_account` | NEW | accept every name (the guard always says yes) | killed | 11-plain-baton-execs, 16-dead-mark-invalidates-alive-cache, 17-account-name-boundary, 19-arg-passthrough |
+| M42 | lib/accounts.sh | `is_uint` | NEW | drop the digit-length cap (arithmetic overflow reachable again) | killed | 15-adversarial-durations |
+| M43 | lib/watch.sh | `night_knobs` | NEW | drop the BATON_WATCH_INTERVAL validation | killed | 18-night-env-knobs |
+| M44 | lib/watch.sh | `night_knobs` | NEW | cap validated with the decimal predicate, so 1.5 reaches [ -gt ] | killed | 18-night-env-knobs |
+| M45 | lib/detect.sh | `parse_reset_epoch` | NEW | ignore the message's timezone group (read the clock in local time) | killed | unit:parse_reset_epoch:one-hour-ahead-is-today, unit:parse_reset_epoch:one-hour-past-rolls-to-tomorrow, 20-parsed-reset-honored |
+| M47 | lib/accounts.sh | `is_unum` | NEW | accept more than one decimal point (1.2.3 reaches sleep as a number) | killed | 18-night-env-knobs |
+| M46 | lib/detect.sh | `parse_reset_epoch` | SHARED | a message with no minutes defaults to :30 instead of :00 | killed | unit:parse_reset_epoch:no-minutes-means-zero |
+
+mutants run: 47   killed: 46   survived: 1 (M31)
+git status --porcelain after run:
+ M .ab/mutation-run.py
+

@@ -251,13 +251,29 @@ MUTANTS = [
      """    dur=$(parse_duration "${3:-$DEFAULT_DEAD}") || exit 1""",
      """    dur=$(parse_duration "${3:-$DEFAULT_DEAD}")"""),
 
+    # M36 re-pointed at a5986fc: the --night block now sources runs.sh and
+    # lock.sh ahead of watch.sh (baton#2's lock wiring landed since a2d951e),
+    # so the old three-line anchor no longer matches. Same behaviour edit
+    # (drop the `shift`), new surrounding lines.
     ("M36", "baton", "dispatch --night", "NEW",
      "--night no longer shifts its own flag off the claude args",
      """  --night)
     shift
+    # runs.sh before lock.sh before watch.sh: the watcher records a receipt
+    # the moment it has a pid and claims a session before resuming one, so
+    # both the recorder and the arbiter have to be defined before the
+    # launcher runs. lock -> runs is the only edge between the two.
+    . "$SCRIPT_DIR/lib/runs.sh"
+    . "$SCRIPT_DIR/lib/lock.sh"
     . "$SCRIPT_DIR/lib/watch.sh"
     night_mode "$@" ;;""",
      """  --night)
+    # runs.sh before lock.sh before watch.sh: the watcher records a receipt
+    # the moment it has a pid and claims a session before resuming one, so
+    # both the recorder and the arbiter have to be defined before the
+    # launcher runs. lock -> runs is the only edge between the two.
+    . "$SCRIPT_DIR/lib/runs.sh"
+    . "$SCRIPT_DIR/lib/lock.sh"
     . "$SCRIPT_DIR/lib/watch.sh"
     night_mode "$@" ;;"""),
 
