@@ -328,11 +328,10 @@ case "${1:-}" in
       # The cost, disclosed rather than discovered later: two forced launches
       # on DIFFERENT accounts can no longer run at once, because this path is
       # both the login entry point and the ordinary force-an-account path, and
-      # the claim is held for the whole life of the session. Splitting an
-      # explicit `--login <account>` out of `baton <account>` (the shape PR #5
-      # uses) is the follow-up that buys the concurrency back without giving
-      # up the serialization; it is a new entry point and a doc change, so it
-      # is not smuggled in here.
+      # the claim is held for the whole life of the session. A dedicated login
+      # entry point that bought that concurrency back without giving up the
+      # serialization would be a possible follow-up; main has no `--login`
+      # flag today, and this path is the only login entry point that exists.
       #
       # Silent on success, so this path's stdout/stderr stay byte-identical to
       # the pre-failover script (scenario 12).

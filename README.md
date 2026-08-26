@@ -19,6 +19,16 @@ using runs out mid-session. `baton` handles both:
 Each account's limits are fully enforced by Anthropic per account; baton just
 moves the baton between subscriptions you already pay for.
 
+## Before you rely on this <!-- DRAFT: Drake decides whether this ships -->
+
+baton launches the official `claude` CLI under accounts you own, one at a
+time. It automates two things: which account a session starts under, and
+relaunching that session under a different account of yours after one hits
+its usage limit. It does not pool usage across accounts, does not share an
+account between people, and does not circumvent the per-account metering
+Anthropic enforces server-side. You are responsible for checking that
+running baton this way fits the terms of each subscription it touches.
+
 ## Install
 
 ```sh
@@ -58,9 +68,14 @@ baton -c                # anything baton doesn't recognize passes through to
 baton <account> [...]   # force one account
 baton --next            # mark last account dead 5h, pick another
 baton --fast            # auto-pick without the liveness probe
+baton --pick            # print auto-pick's choice only (dead-filter + tally,
+                        # no probe, no launch) -- for scripting/checking
+baton --probe <name>    # probe one account now, print its class (ALIVE /
+                        # LIMIT / AUTH / UNKNOWN), apply the resulting mark
 baton --status          # accounts, weights, launches, dead-until
 baton --dead [n] [dur]  # mark dead (90m / 5h / 3d)
 baton --revive <name>   # clear a dead mark
+baton --reset           # zero every account's launch tally
 baton --pickup          # what the last session left behind, as JSON
 baton --locks           # every lock subject on disk, with state and holder
 ```
