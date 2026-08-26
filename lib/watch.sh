@@ -212,6 +212,61 @@ run_watched() {
     continue) resume_args=(-c) ;;
   esac
 
+  # What the log will call this launch. Computed BEFORE the fork, because the
+  # two refusals below have to name it and neither of them will have a child.
+  local what
+  case "$resume_mode" in
+    resume:*) what="resumed session ${resume_mode#resume:} under account '$name'" ;;
+    continue) what="continued the last session under account '$name'" ;;
+    *)        what="account '$name'" ;;
+  esac
+
+  # POSITIVE CONTROL ON THE PROCESS TABLE, before anything is forked.
+  #
+  # Everything this function does after the fork depends on `ps` being able to
+  # answer questions: the start-up liveness check, the fingerprint on the
+  # receipt, the pid-reuse guard that reads it back. A `ps` that is denied,
+  # missing, or broken answers a question about a live child exactly like a
+  # `ps` reporting an absent one -- empty output, nonzero exit -- so the
+  # watcher concluded "gone", fell through to a blocking wait, and watched no
+  # transcripts for the rest of the night. The limit line that triggers a
+  # handoff would never be seen and the run would look like a clean session.
+  #
+  # lib/runs.sh has carried the control since baton#3: pid 1 exists on every
+  # machine this runs on, so a `ps` that cannot describe it is not answering
+  # questions at all. The watcher simply never called it.
+  #
+  # Exit 2, not die's 1, and before the fork rather than after: a watcher that
+  # cannot watch must not start a child it would immediately lose track of.
+  # "Could not inspect" is not a failure of the run, it is a refusal to guess.
+  _runs_ps_usable || {
+    echo "baton: watch-result=could-not-inspect reason=process-table-unreadable -- ps cannot describe pid 1, so a child could not be watched or even confirmed to exist. Nothing was launched. This exit 2 belongs to the watcher, not to a child." >&2
+    exit 2
+  }
+
+  # PREFLIGHT THE EXECUTABLE, before the fork, because after a successful exec
+  # the question is unanswerable.
+  #
+  # The previous round asked it afterwards, from the child's exit code: 126 or
+  # 127 meant "the exec failed". That premise is false, and this repo's own
+  # fixture is the counterexample -- tests/fixtures/bin/claude runs perfectly
+  # well and returns 127 because a behavior file told it to, and a real CLI
+  # may do the same. An exit code is application status. It cannot say whether
+  # the application ever started.
+  #
+  # Before the fork it is a plain question with a plain answer: does the name
+  # resolve on PATH, and is what it resolves to executable. `command -v`
+  # already requires executability, and the explicit -x is kept for the window
+  # between resolving and forking. ENVARGS only ever sets or unsets
+  # CLAUDE_CONFIG_DIR, never PATH, so the parent resolves the same binary the
+  # child would.
+  local claude_bin
+  claude_bin=$(command -v claude 2>/dev/null)
+  if [ -z "$claude_bin" ] || [ ! -x "$claude_bin" ]; then
+    handoff_log "LAUNCH FAILED: $what -- the claude executable does not resolve on PATH, so no child was started and no unit was opened"
+    die "cannot launch '$name': no executable 'claude' on PATH"
+  fi
+
   if [ "${#resume_args[@]}" -gt 0 ]; then
     "${ENVARGS[@]}" claude "${resume_args[@]}" "$@" &
   else
@@ -249,8 +304,18 @@ run_watched() {
   # already-reaped pid returns 127, which would overwrite a child's real exit
   # code with a fake one on its way to NIGHT_EXIT_CODE.
   sleep "$interval"
-  local launch_code="" state
-  state=$(ps -p "$pid" -o state= 2>/dev/null | tr -d ' ')
+  local launch_code="" state ps_rc
+  state=$(ps -p "$pid" -o state= 2>/dev/null); ps_rc=$?
+  state=$(printf '%s' "$state" | tr -d ' \n')
+  if [ "$ps_rc" -ne 0 ] && ! _runs_ps_usable; then
+    # `ps` answered nonzero AND cannot describe pid 1 either: it stopped
+    # working between the control above and here. An empty answer from a
+    # broken `ps` is not "the child is gone" -- it is "nobody asked". Waiting
+    # on a live child here would block until it exits with no transcript
+    # watching at all, which is the silent-degradation shape this guards.
+    echo "baton: watch-result=could-not-inspect reason=process-table-failed-mid-launch -- ps stopped answering after the child was started, so its liveness is unknown. This exit 2 belongs to the watcher, not to a child." >&2
+    exit 2
+  fi
   case "$state" in
     ''|Z*) wait "$pid" 2>/dev/null; launch_code=$? ;;
   esac
@@ -267,29 +332,19 @@ run_watched() {
   # terminal, and in the file that makes a refusal (the guard WORKING)
   # indistinguishable from a child that started and vanished. night_mode still
   # logs what it is about to try; the difference is a tense.
-  local what
-  case "$resume_mode" in
-    resume:*) what="resumed session ${resume_mode#resume:} under account '$name'" ;;
-    continue) what="continued the last session under account '$name'" ;;
-    *)        what="account '$name'" ;;
-  esac
   if [ "$receipt_ok" -eq 0 ]; then
     # No receipt means no durable evidence this child exists, so there is
     # nothing to point a restart at and no launch to claim. Same rule as the
     # lock: the record follows the evidence, never the intention.
     handoff_log "LAUNCH FAILED: $what -- the launch receipt for unit $unit could not be written, so nothing durable records this child"
     warn "the launch receipt for '$name' could not be written; see $HANDOFF_LOG"
-  elif [ -n "$launch_code" ] && { [ "$launch_code" = 127 ] || [ "$launch_code" = 126 ]; }; then
-    # 127 is "command not found", 126 is "found, not executable". Both mean
-    # the exec never happened -- the one case where a pid existed and a
-    # session did not.
-    handoff_log "LAUNCH FAILED: $what -- the child could not be executed (exit $launch_code); no session started"
-    warn "'$name' could not be launched (exit $launch_code); see $HANDOFF_LOG"
   elif [ -n "$launch_code" ]; then
-    # It ran and has already finished: a headless child that did its work, or
-    # one that hit its limit on the first call. That IS a launch, and calling
-    # it a failure would put a false line in the log to avoid a false line in
-    # the log.
+    # It exec'd and has already finished: a headless child that did its work,
+    # one that hit its limit on the first call, or one that failed on its own
+    # terms. All three ARE launches. The exit code is recorded as what it is
+    # -- application status -- and never re-read as evidence about whether the
+    # program started, which is the mistake the preflight above now prevents
+    # from ever needing to be made.
     handoff_log "LAUNCHED: $what as unit $unit (pid $pid); already exited $launch_code before the first watch tick"
   else
     handoff_log "LAUNCHED: $what as unit $unit (pid $pid)"
