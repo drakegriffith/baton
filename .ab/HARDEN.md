@@ -425,3 +425,130 @@ Suite at the end of the fix seat, verbatim:
     TESTS: 55  PASS: 55  FAIL: 0
 
 (53 inherited + 25-resumed-session-growth + 26-exhaustion-beats-cap.)
+
+---
+
+## 6. Full re-run at a5986fc (2026-08-26, baton#7 side finding)
+
+Section 5's re-run covered only the 6 mutants review had rewritten; the
+headline "47 mutants, 0 survivors" claim was last re-derived in full at
+`a2d951e`, five substantive commits before `a5986fc` (`28a4f1f` durable
+receipts, `4831793` lock root, `3194623`, the four-defect close in `a5986fc`
+itself, plus README-only commits). This section re-derives all 47 against
+`a5986fc`, not a sample.
+
+**Anchor check (step before spending the 33 minutes).** For each of the 47
+mutants, does its recorded literal still occur exactly once in the current
+file? Checked by loading `.ab/mutation-run.py`'s own `MUTANTS` table and
+counting matches against `a5986fc`'s tree, without running the suite.
+First pass: 46/47 matched, 1 stale -- `M36` (`baton`, `dispatch --night`).
+Its old 3-line anchor (`shift` immediately followed by a single
+`. "$SCRIPT_DIR/lib/watch.sh"`) no longer matched because baton#2's lock
+wiring (`a5986fc`) now sources `runs.sh` and `lock.sh` ahead of `watch.sh` in
+that same block. The mapping was obvious -- same mutation intent (drop the
+`shift` that removes `--night` from `"$@"` before it reaches the child),
+new surrounding lines -- so `M36`'s `frm`/`to` literals in
+`.ab/mutation-run.py` were re-pointed to the current 8-line block (comment
+included) and re-checked: 47/47 matched before the full run started. Under
+half stale (1/47), so the premise ("the script still applies cleanly, ~31
+minutes") held and the full run proceeded rather than stopping for
+re-authoring.
+
+**Wall-clock sample.** `M01`-`M05` run alone: 3m33s (42.6s/mutant), giving a
+~33-minute projection for all 47 -- consistent with the ~31-minute estimate
+this ticket was funded against.
+
+**Full run**, `python3 .ab/mutation-run.py` at `a5986fc` with `M36`
+re-pointed, output logged verbatim to `.ab/mutation-run-a5986fc.log`
+(attached; also pasted below in full, this doc's own stated discipline of
+pasting rather than summarizing):
+
+```
+| id | file | function | prov | mutation | verdict | failing tests |
+| -- | ---- | -------- | ---- | -------- | ------- | ------------- |
+| M01 | lib/detect.sh | `classify_text` | NEW | reorder: AUTH tested before LIMIT (precedence flip) | killed | unit:classify_text:auth-phrase-first |
+| M02 | lib/detect.sh | `classify_text` | NEW | drop case-insensitivity from the LIMIT regex (-qiE -> -qE) | killed | unit:classify_text:multiline-json-line |
+| M03 | lib/detect.sh | `classify_text` | NEW | swap the total-partition fallback: UNKNOWN -> AUTH | killed | unit:classify_text:ordinary-chatter, unit:classify_text:empty-string, unit:classify_text:limit-word-not-alone, unit:classify_text:whitespace-only |
+| M04 | lib/detect.sh | `parse_reset_epoch` | SHARED | boundary flip: already-passed test `t <= nowt` -> `t >= nowt` | killed | unit:parse_reset_epoch:one-hour-ahead-is-today, unit:parse_reset_epoch:one-hour-past-rolls-to-tomorrow, unit:parse_reset_epoch:noon-boundary-1230pm, unit:parse_reset_epoch:midnight-boundary-1215am |
+| M05 | lib/detect.sh | `parse_reset_epoch` | SHARED | drop the roll-to-tomorrow step for an already-passed reset time | killed | unit:parse_reset_epoch:one-hour-past-rolls-to-tomorrow, unit:parse_reset_epoch:noon-boundary-1230pm, unit:parse_reset_epoch:midnight-boundary-1215am |
+| M06 | lib/detect.sh | `parse_reset_epoch` | SHARED | 12-hour wrap boundary: `% 12` -> `% 24` (breaks 12:xxpm/12:xxam) | killed | unit:parse_reset_epoch:noon-boundary-1230pm |
+| M07 | lib/accounts.sh | `parse_duration` | SHARED | unit swap: `5h` parsed as 5*60 instead of 5*3600 | killed | 02-reset-fallback, 15-adversarial-durations |
+| M08 | lib/accounts.sh | `parse_duration` | SHARED | drop the malformed-duration rejection (bad input reaches the arithmetic) | killed | 15-adversarial-durations |
+| M09 | lib/accounts.sh | `mark_dead_for_class` | NEW | operator flip: parsed reset accepted only when in the PAST (-gt -> -lt) | killed | 02-reset-fallback, 07-exhaustion, 20-parsed-reset-honored, 26-exhaustion-beats-cap |
+| M10 | lib/accounts.sh | `mark_dead_for_class` | NEW | AUTH dead duration 3600s -> 7200s | killed | 04-headless-auth-rotate |
+| M11 | lib/accounts.sh | `mark_dead` | SHARED | dropped step: a dead mark no longer invalidates the ALIVE cache entry | killed | 16-dead-mark-invalidates-alive-cache |
+| M12 | lib/accounts.sh | `ranked` | SHARED | ranking order reversed: `sort -n` -> `sort -rn` (busiest account first) | killed | 01-interactive-limit-headline, 02-reset-fallback, 03-headless-limit-rotate, 04-headless-auth-rotate |
+| M13 | lib/accounts.sh | `probe` | NEW | drop the canary check: any UNKNOWN probe reply is reported ALIVE | killed | 10-classification-contract-outline, 23-unknown-probe-launches-anyway |
+| M14 | lib/accounts.sh | `set_envargs` | NEW | swap the primary/non-primary branches (CONFIG_DIR + ENVARGS both) | killed | 01-interactive-limit-headline, 03-headless-limit-rotate, 04-headless-auth-rotate, 07-exhaustion |
+| M15 | lib/accounts.sh | `pick_live` | NEW | UNKNOWN probe result skips the account instead of launching anyway | killed | 23-unknown-probe-launches-anyway |
+| M16 | lib/accounts.sh | `alive_fresh` | SHARED | freshness comparison inverted (-lt -> -gt): cache never trusted | killed | 01-interactive-limit, 02-reset-fallback, 03-headless-limit-rotate, 06-nonzero-exit-no-rotation |
+| M17 | lib/accounts.sh | `bump` | SHARED | dropped step: last-used account no longer recorded | killed | 22-last-used-tracking |
+| M18 | lib/accounts.sh | `launch` | SHARED | exec -> fork+wait (plain baton grows an extra process generation) | killed | 11-plain-baton-execs, 12-existing-flags-outline, 23-unknown-probe-launches-anyway, 35-interactive-resume-is-single-writer |
+| M19 | lib/accounts.sh | `pick_live` | NEW | drop the BATON_EXCLUDE pass-through from ranked() | killed | 21-baton-exclude-regression |
+| M20 | lib/watch.sh | `launch_size` | NEW | pre-launch size reported as 0: a resumed transcript is re-read from byte 0 | killed | 25-resumed-session-growth |
+| M21 | lib/watch.sh | `run_watched` | NEW | session id blanked on a live-transcript rotation (forces -c instead of --resume) | killed | 01-interactive-limit-headline, 24-cwd-with-dot-in-name, 25-resumed-session-growth, 33-resume-and-login-are-single-writer |
+| M22 | lib/watch.sh | `run_watched` | NEW | post-exit probe: dropped condition, AUTH no longer rotates | killed | 04-headless-auth-rotate |
+| M23 | lib/watch.sh | `run_watched` | NEW | live transcript: dropped condition, AUTH line no longer kills the child | killed | 10-classification-contract-outline |
+| M24 | lib/watch.sh | `run_watched` | NEW | signal swap: SIGTERM -> SIGKILL (child loses its chance to clean up) | killed | 01-interactive-limit-headline, 10-classification-contract-outline, 24-cwd-with-dot-in-name, 25-resumed-session-growth |
+| M25 | lib/watch.sh | `transcript_dir_for` | NEW | slug rule: only `/` replaced, `.` left intact | killed | 24-cwd-with-dot-in-name |
+| M26 | lib/watch.sh | `night_mode` | NEW | handoff cap off-by-one (-gt -> -ge): cap N allows only N-1 handoffs | killed | 08-handoff-cap, 26-exhaustion-beats-cap |
+| M27 | lib/watch.sh | `night_mode` | NEW | handoff counter never incremented (cap unreachable) | killed | 08-handoff-cap |
+| M28 | lib/watch.sh | `night_mode` | NEW | exit-code swap: child's real code replaced by 0 | killed | 01-interactive-limit-headline, 06-nonzero-exit-no-rotation, 19-arg-passthrough, 25-resumed-session-growth |
+| M29 | lib/watch.sh | `night_mode` | NEW | resume-mode test inverted (-n -> -z): known session id forces -c | killed | 01-interactive-limit-headline, 24-cwd-with-dot-in-name, 25-resumed-session-growth, 33-resume-and-login-are-single-writer |
+| M30 | lib/watch.sh | `night_mode` | NEW | cap checked before exhaustion: the last account's limit is misreported as a cap hit | killed | 26-exhaustion-beats-cap |
+| M31 | lib/watch.sh | `run_watched` | NEW | growth test relaxed (-gt -> -ge): unchanged file re-read every poll | **SURVIVED** | - |
+| M32 | baton | `dispatch --probe` | SHARED | drop the account-exists guard on --probe | killed | 17-account-name-boundary |
+| M33 | baton | `dispatch --pick` | SHARED | --pick prints two candidates instead of one | killed | 12-existing-flags-outline, 21-baton-exclude-regression |
+| M34 | baton | `dispatch empty-accounts guard` | SHARED | empty-accounts guard condition flipped (-eq 0 -> -gt 0) | killed | 01-interactive-limit-headline, 02-reset-fallback, 03-headless-limit-rotate, 04-headless-auth-rotate |
+| M35 | baton | `dispatch --dead` | SHARED | drop the re-raise of parse_duration's die (subshell failure swallowed) | killed | 15-adversarial-durations |
+| M36 | baton | `dispatch --night` | NEW | --night no longer shifts its own flag off the claude args | killed | 19-arg-passthrough |
+| M37 | lib/accounts.sh | `die_no_live_account` | NEW | reword the exhaustion message the operator is told to act on (drops the accounts root) | killed | 07-exhaustion |
+| M38 | lib/accounts.sh | `auto_launch` | SHARED | drop the user's claude args on the plain launch path | killed | 16-dead-mark-invalidates-alive-cache, 19-arg-passthrough, 23-unknown-probe-launches-anyway, 35-interactive-resume-is-single-writer |
+| M39 | lib/accounts.sh | `is_dead` | SHARED | drop the empty-guard: a missing dead file reaches [ -gt ] as an empty string | killed | 12-existing-flags-outline |
+| M40 | lib/accounts.sh | `mark_dead_for_class` | NEW | ignore the parsed reset time: every LIMIT takes the 5h fallback | killed | 20-parsed-reset-honored |
+| M41 | lib/accounts.sh | `is_account` | NEW | accept every name (the guard always says yes) | killed | 11-plain-baton-execs, 16-dead-mark-invalidates-alive-cache, 17-account-name-boundary, 19-arg-passthrough |
+| M42 | lib/accounts.sh | `is_uint` | NEW | drop the digit-length cap (arithmetic overflow reachable again) | killed | 15-adversarial-durations |
+| M43 | lib/watch.sh | `night_knobs` | NEW | drop the BATON_WATCH_INTERVAL validation | killed | 18-night-env-knobs |
+| M44 | lib/watch.sh | `night_knobs` | NEW | cap validated with the decimal predicate, so 1.5 reaches [ -gt ] | killed | 18-night-env-knobs |
+| M45 | lib/detect.sh | `parse_reset_epoch` | NEW | ignore the message's timezone group (read the clock in local time) | killed | unit:parse_reset_epoch:one-hour-ahead-is-today, unit:parse_reset_epoch:one-hour-past-rolls-to-tomorrow, 20-parsed-reset-honored |
+| M47 | lib/accounts.sh | `is_unum` | NEW | accept more than one decimal point (1.2.3 reaches sleep as a number) | killed | 18-night-env-knobs |
+| M46 | lib/detect.sh | `parse_reset_epoch` | SHARED | a message with no minutes defaults to :30 instead of :00 | killed | unit:parse_reset_epoch:no-minutes-means-zero |
+
+mutants run: 47   killed: 46   survived: 1 (M31)
+git status --porcelain after run:
+ M .ab/mutation-run.py
+```
+
+**Tally: 47/47 anchors matched (46/47 on the first pass, 1 stale row
+re-pointed with an obvious mapping), 46 killed, 1 equivalent (M31), 0
+survivors that are not the already-documented equivalent, 0 stale-anchor
+rows left unresolved.** `M31` is the same mutant, at the same line, with
+the same equivalence proof section 1 already gave (`size == offset` reads
+zero bytes via `tail -c "+$((offset+1))"` either way) -- carried forward,
+not re-argued.
+
+**No coverage regression.** Every mutant that was killed in section 1's
+round 2 (`a2d951e`-era) or section 5 (the post-review re-run) is still
+killed at `a5986fc`. No "Survivors at a5986fc" heading is needed because
+there are none beyond the standing equivalent.
+
+Wall-clock: 39m25s (13:06:55-13:46:20 EDT), longer than the 33-minute
+sample projection but the same order of magnitude -- attributed to normal
+machine load variance across a 47-mutant run, not to a change in the
+apparatus.
+
+Suite at `a5986fc`, verbatim, run separately from the mutation harness right
+after it finished (`bash tests/run.sh`):
+
+    TESTS: 191  PASS: 191  FAIL: 0
+
+(the baseline `.ab/mutation-run.py`'s own `bash tests/run.sh` invocation ran
+against for every one of the 47 mutants; 136 more than section 5's 55,
+reflecting all the scenarios added between `a2d951e` and `a5986fc`,
+including the scenarios `a5986fc` itself added for the four verify-seat
+defects.)
+
+`git status --porcelain` after the full run: only `M .ab/mutation-run.py`
+(this section's own `M36` re-point) -- no `M` line for `baton`,
+`lib/detect.sh`, `lib/accounts.sh`, or `lib/watch.sh`. Tree confirmed clean
+of production-file drift.
