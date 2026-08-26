@@ -89,6 +89,53 @@ scenario_check "it is NOT reported as a failed launch (got $(count_log 'LAUNCH F
 scenario_check "positive control: the predicate can see a leak" \
   $([ "$(predicate_positive_control "$SCRATCH/predicate-control.txt")" -eq 3 ]; echo $?)
 
+# --- part C: the exec runs the path the preflight resolved -----------------
+# Round-4 finding. The preflight resolved `claude` on PATH and then the exec
+# line ran the BARE NAME again, so the two were separate resolutions of the
+# same word at two different moments. Anything that changes in between -- a
+# PATH edit, a chmod, a replaced file -- passes the check and fails the exec,
+# and the failure lands after the fork, where (part B) the exit code can no
+# longer be read as evidence about starting.
+#
+# One resolution, used twice. Asserted by looking at the child's ACTUAL
+# command line through ps: an absolute path ending in /claude, never the bare
+# word. The child is confirmed running first, so the exec has certainly
+# happened and this is not racing it.
+fresh_root
+write_behavior a <<'EOF'
+STEP_EXIT=(0)
+STEP_TRANSCRIPT=("sess-argv")
+STEP_BLOCK=(1)
+STEP_BLOCK_EXIT=(143)
+EOF
+start_night
+f=$(wait_for_transcript a 10)
+scenario_check "positive control: the child is running" $([ -n "$f" ]; echo $?)
+
+startfile=$(ls "$BATON_ACCOUNTS_ROOT/.runs"/*.start 2>/dev/null | head -1)
+scenario_check "positive control: a launch receipt exists" $([ -n "$startfile" ]; echo $?)
+child_pid=$(awk -F= '/^pid=/{print $2}' "$startfile" 2>/dev/null)
+scenario_check "positive control: the receipt names a pid" $([ -n "$child_pid" ]; echo $?)
+
+# Asserted on the RECEIPT, not on `ps -o args=`. The first draft of this row
+# read the live child's command line and passed before the fix -- for the
+# wrong reason: by then the child has exec'd through to the fixture script, so
+# ps shows the KERNEL's resolution of the name, which is absolute no matter
+# what baton passed. The receipt records what baton itself decided to run, and
+# that is the thing under test.
+recorded_cmd=$(awk -F= '/^command=/{sub(/^command=/,""); print}' "$startfile" 2>/dev/null)
+if [ -z "$recorded_cmd" ]; then
+  echo "43: COULD NOT INSPECT -- the receipt carries no command field" >&2
+  stop_night; kill_fake_claude a; cleanup_root
+  exit 2
+fi
+scenario_check "the receipt names the resolved absolute executable, not the bare word" \
+  $(printf '%s' "$recorded_cmd" | grep -qE '^/[^ ]*/claude( |$)'; echo $?)
+
+stop_night
+kill_fake_claude a
+cleanup_root
+
 kill_fake_claude a
 kill_fake_claude b
 cleanup_root

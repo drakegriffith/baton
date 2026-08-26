@@ -260,17 +260,26 @@ run_watched() {
   # between resolving and forking. ENVARGS only ever sets or unsets
   # CLAUDE_CONFIG_DIR, never PATH, so the parent resolves the same binary the
   # child would.
+  #
+  # The resolved path is then USED, not re-resolved. The exec line used to run
+  # the bare name again, which made preflight and launch two separate lookups
+  # of the same word at two different moments -- a PATH edit, a chmod, or a
+  # replaced file between them passes the check and fails the exec, after the
+  # fork, where the exit code can no longer answer the question (see below).
+  # One resolution, used twice. `-f` rejects a directory outright; measured
+  # note, `command -v` already skips directories on this bash, so -f is the
+  # belt for a path that becomes one between the lookup and the fork.
   local claude_bin
   claude_bin=$(command -v claude 2>/dev/null)
-  if [ -z "$claude_bin" ] || [ ! -x "$claude_bin" ]; then
+  if [ -z "$claude_bin" ] || [ ! -f "$claude_bin" ] || [ ! -x "$claude_bin" ]; then
     handoff_log "LAUNCH FAILED: $what -- the claude executable does not resolve on PATH, so no child was started and no unit was opened"
-    die "cannot launch '$name': no executable 'claude' on PATH"
+    die "cannot launch '$name': no executable file 'claude' on PATH"
   fi
 
   if [ "${#resume_args[@]}" -gt 0 ]; then
-    "${ENVARGS[@]}" claude "${resume_args[@]}" "$@" &
+    "${ENVARGS[@]}" "$claude_bin" "${resume_args[@]}" "$@" &
   else
-    "${ENVARGS[@]}" claude "$@" &
+    "${ENVARGS[@]}" "$claude_bin" "$@" &
   fi
   local pid=$!
 
@@ -282,7 +291,7 @@ run_watched() {
   # these are not.
   local unit="night-$(date -u +%Y%m%dT%H%M%SZ)-$$-$name"
   local receipt_ok=1
-  runs_record_start "$unit" "$pid" "$(runs_fingerprint "$pid")" "claude ${resume_args[*]-} $*" \
+  runs_record_start "$unit" "$pid" "$(runs_fingerprint "$pid")" "$claude_bin ${resume_args[*]-} $*" \
     || receipt_ok=0
 
   local interval="$NIGHT_INTERVAL"
@@ -307,13 +316,21 @@ run_watched() {
   local launch_code="" state ps_rc
   state=$(ps -p "$pid" -o state= 2>/dev/null); ps_rc=$?
   state=$(printf '%s' "$state" | tr -d ' \n')
-  if [ "$ps_rc" -ne 0 ] && ! _runs_ps_usable; then
-    # `ps` answered nonzero AND cannot describe pid 1 either: it stopped
-    # working between the control above and here. An empty answer from a
-    # broken `ps` is not "the child is gone" -- it is "nobody asked". Waiting
-    # on a live child here would block until it exits with no transcript
-    # watching at all, which is the silent-degradation shape this guards.
-    echo "baton: watch-result=could-not-inspect reason=process-table-failed-mid-launch -- ps stopped answering after the child was started, so its liveness is unknown. This exit 2 belongs to the watcher, not to a child." >&2
+  # The control has to be about THIS SUBJECT, not about `ps` in general. A ps
+  # can answer for pid 1 and refuse everything else -- a sandbox that permits
+  # init, a container with a restricted /proc view, a visibility policy. The
+  # pre-fork control passes, the child-specific call comes back empty, and
+  # empty reads as "the child is gone": a blocking wait, and no transcript
+  # watching for the rest of the night, so the limit line that triggers a
+  # handoff is never seen.
+  #
+  # `kill -0` is the second opinion, and it is a good one here precisely
+  # because this process FORKED that pid -- it is a signal-permission question
+  # answered by the kernel, not another read of the same table. When the two
+  # disagree -- ps says nothing, kill -0 says the pid is there -- that is
+  # could-not-inspect. It is never "dead".
+  if { [ "$ps_rc" -ne 0 ] || [ -z "$state" ]; } && kill -0 "$pid" 2>/dev/null; then
+    echo "baton: watch-result=could-not-inspect reason=child-liveness-unreadable -- ps gave no answer for the child just started, but the pid is still signalable, so its liveness cannot be established and its transcript cannot be watched. The child is still running and unit $unit records it. This exit 2 belongs to the watcher, not to a child." >&2
     exit 2
   fi
   case "$state" in
