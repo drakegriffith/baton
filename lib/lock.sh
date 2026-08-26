@@ -98,7 +98,14 @@ lock_dir() {
     return
   fi
   local phys hash
-  phys="$(cd "$HOME/.claude" 2>/dev/null && pwd -P)" || phys="$HOME/.claude"
+  # Fallback resolves the PARENT, not the literal string: before ~/.claude
+  # exists (fresh machine, pre-login) a HOME that traverses a symlink (macOS
+  # /tmp -> /private/tmp) would otherwise hash one path now and another the
+  # moment the directory appears, which is two roots for one user
+  # (verify-lock2, 2026-08-26).
+  phys="$(cd "$HOME/.claude" 2>/dev/null && pwd -P)" \
+    || phys="$(cd "$HOME" 2>/dev/null && pwd -P)/.claude" \
+    || phys="$HOME/.claude"
   if command -v shasum >/dev/null 2>&1; then
     hash="$(printf '%s' "$phys" | shasum -a 256 | awk '{print $1}')"
   elif command -v sha256sum >/dev/null 2>&1; then

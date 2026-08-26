@@ -82,5 +82,21 @@ scenario_check "and launched no replacement" $([ ! -e "$SCRATCH/ran4" ]; echo $?
 scenario_check "--redispatch marks its OWN could-not-inspect on stderr" \
   $(grep -q "$MARKER" "$SCRATCH/b2.err"; echo $?)
 
+# baton#12 marker hole: the login claim inside `baton <account>` (no --resume,
+# so the session guard has no subject and the login claim is the only guard)
+# exited 2 without the marker. verify-lock2 (2026-08-26) showed the fix could
+# be reverted with the whole suite still green, so this pins it.
+launches_before_login=$(grep -c 'argv=' "$(fake_log)" 2>/dev/null); : "${launches_before_login:=0}"
+chmod 000 "$LOCKS"
+"$BATON_BIN" a >"$SCRATCH/login.out" 2>"$SCRATCH/login.err"
+rc5=$?
+chmod 755 "$LOCKS"
+scenario_check "baton <account> under an unusable lock root exits 2 from the login claim" \
+  $([ "$rc5" -eq 2 ]; echo $?)
+scenario_check "and carries the marker naming the login subject" \
+  $(grep -q "$MARKER" "$SCRATCH/login.err" && grep -q "subject='login'" "$SCRATCH/login.err"; echo $?)
+scenario_check "and launched nothing" \
+  $([ "$(grep -c 'argv=' "$(fake_log)" 2>/dev/null || echo 0)" -eq "${launches_before_login:-0}" ]; echo $?)
+
 cleanup_root
 scenario_end

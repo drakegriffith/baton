@@ -103,8 +103,14 @@ claude_pid=$(awk '{print $1}' "$HOME/.claude/.fake-pid-ppid" 2>/dev/null)
 scenario_check "the lock status names the fake claude pid" \
   $([ "$holder_pid" = "$claude_pid" ]; echo $?)
 
-# Cleanup any still-blocking fake claude and its parent racer subshells.
-kill_fake_claude a
+# Cleanup: kill BOTH racers and every fake claude under this scratch, then
+# wait. kill_fake_claude reads one pid file that holds only the LAST fake
+# claude, so when the fix is absent and both racers launched, one survived
+# and the bare wait hung the whole suite instead of failing this scenario
+# (verify-lock2 ablation, 2026-08-26). A regression test must fail, not hang.
+kill -KILL "$P1" "$P2" 2>/dev/null || true
+pkill -KILL -f "$SCRATCH" 2>/dev/null || true
+kill_fake_claude a 2>/dev/null || true
 wait "$P1" 2>/dev/null || true
 wait "$P2" 2>/dev/null || true
 cleanup_root

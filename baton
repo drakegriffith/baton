@@ -88,7 +88,7 @@
 #   BATON_EXCLUDE            account name auto-pick must skip (any mode)
 #   BATON_WATCH_INTERVAL     --night poll interval, seconds (default: 5)
 #   BATON_MAX_HANDOFFS       --night handoff cap per run (default: 3)
-#   BATON_LOCK_DIR           lock root (default: <accounts root>/.locks)
+#   BATON_LOCK_DIR           lock root (default: ${XDG_CACHE_HOME:-$HOME/.cache}/baton/locks-<hash of ~/.claude>)
 #   BATON_LOCK_DISABLE=1     turn the single-writer guard OFF. It exists
 #                            because a guard that strands an operator with no
 #                            way through is a worse failure than the one it
