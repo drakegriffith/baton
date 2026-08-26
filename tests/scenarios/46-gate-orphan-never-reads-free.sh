@@ -5,7 +5,7 @@
 # that the subject is could-not-inspect, exit 2, with the lock-result marker.
 set -u
 . "$FIXTURES_DIR/lib.sh"
-scenario_begin "44-gate-orphan-never-reads-free"
+scenario_begin "46-gate-orphan-never-reads-free"
 fresh_root
 export BATON_LOCK_PROV=test
 

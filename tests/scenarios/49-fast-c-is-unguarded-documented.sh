@@ -11,7 +11,7 @@
 # a new entry point, not a silent behavioral change.
 set -u
 . "$FIXTURES_DIR/lib.sh"
-scenario_begin "47-fast-c-is-unguarded-documented"
+scenario_begin "49-fast-c-is-unguarded-documented"
 fresh_root
 export BATON_LOCK_PROV=test
 

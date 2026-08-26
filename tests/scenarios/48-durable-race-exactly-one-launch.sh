@@ -6,7 +6,7 @@
 # launches per rep; if it cannot observe the failure, the scenario fails.
 set -u
 . "$FIXTURES_DIR/lib.sh"
-scenario_begin "46-durable-race-exactly-one-launch"
+scenario_begin "48-durable-race-exactly-one-launch"
 fresh_root
 export BATON_LOCK_PROV=test
 

@@ -6,7 +6,7 @@
 # write the primary directory and the single-writer guard is silently bypassed.
 set -u
 . "$FIXTURES_DIR/lib.sh"
-scenario_begin "45-lock-root-is-machine-wide"
+scenario_begin "47-lock-root-is-machine-wide"
 fresh_root
 export BATON_LOCK_PROV=test
 
