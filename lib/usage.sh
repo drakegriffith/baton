@@ -81,7 +81,13 @@ def number(value):
 
 
 written = number(doc.get("written_at"))
-if written is None or time.time() - written > max_age:
+# Two-sided on purpose. A one-sided `now - written > max_age` treats a
+# written_at in the FUTURE as maximally fresh, which is the one wrong answer
+# that arms the trigger: a clock skew, a timezone bug, or a hand-edited file
+# would hand the watcher a percentage from a window that has not happened and
+# switch a working account off on it. A signal dated ahead of now is not
+# fresh, it is unexplained.
+if written is None or abs(time.time() - written) > max_age:
     unknown()
 
 window = doc.get("five_hour")

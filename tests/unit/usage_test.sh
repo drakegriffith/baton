@@ -47,6 +47,15 @@ write_signal nowritten '{"five_hour":{"used_percentage":83}}'
 check_fraction "no-written-at" nowritten unknown
 write_signal stale "{\"five_hour\":{\"used_percentage\":83},\"written_at\":$((NOW-4000))}"
 check_fraction "stale-beyond-default-max-age" stale unknown
+# A written_at in the FUTURE is the case a one-sided staleness test reads as
+# maximally fresh: `now - written > max_age` is negative, so a signal dated
+# tomorrow passes every check and arms the trigger with a percentage from a
+# window that has not happened. Clock skew, a timezone bug, and a hand-edited
+# file all produce it. Not fresh: unexplained.
+write_signal future "{\"five_hour\":{\"used_percentage\":83},\"written_at\":$((NOW+4000))}"
+check_fraction "written-at-in-the-future" future unknown
+write_signal justahead "{\"five_hour\":{\"used_percentage\":83},\"written_at\":$((NOW+30))}"
+check_fraction "a-few-seconds-ahead-is-still-fresh" justahead 0.83
 write_signal badpct "{\"five_hour\":{\"used_percentage\":\"eighty\"},\"written_at\":$NOW}"
 check_fraction "non-numeric-percentage" badpct unknown
 write_signal emptyfile ''

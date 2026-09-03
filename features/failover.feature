@@ -98,10 +98,14 @@
 #
 #       FAIL CLOSED. usage_fraction answers the single token `unknown` when
 #       the file is missing, unparseable, lacks five_hour.used_percentage,
-#       holds a non-numeric value, or was written more than
-#       BATON_USAGE_MAX_AGE seconds ago -- and `unknown` NEVER arms the
-#       trigger. An old number about a five-hour window is not a small error,
-#       it is a statement about a different window.
+#       holds a non-numeric value, or carries a `written_at` more than
+#       BATON_USAGE_MAX_AGE seconds away from now IN EITHER DIRECTION -- and
+#       `unknown` NEVER arms the trigger. The freshness window is two-sided:
+#       a timestamp in the future is not fresh, it is unexplained (clock
+#       skew, a timezone bug, a hand-edited file), and reading it as fresh is
+#       the one wrong answer that arms the trigger. An old number about a
+#       five-hour window is not a small error either; it is a statement about
+#       a different window.
 #
 #       A soft handoff is a handoff in every other respect: it kills the
 #       child exactly as the LIMIT path does, closes the unit with a

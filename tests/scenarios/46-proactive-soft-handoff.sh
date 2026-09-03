@@ -154,5 +154,59 @@ stop_night
 kill_fake_claude a
 cleanup_root
 
+# --- 5. the quiet window is a CONDITION, not a comment --------------------
+# Everything phase 2 needs is true here -- a compaction checkpoint and 85% of
+# the window -- except that the session kept working. A build whose third
+# condition is prose rather than a guard kills a session in the middle of the
+# turn that follows the checkpoint, which is exactly the mid-turn orphan
+# hazard of issues #2 and #12, and phases 1-4 all still pass for it.
+fresh_root
+# 3s, not the 1s the phases above use. The quiet window is measured in whole
+# seconds, so a 1s window is really "somewhere between 0 and 1 second" once
+# the two samples land either side of a second boundary -- a 0.3s write
+# cadence can slip through it, and the test would fail on a build that is
+# correct. 3s leaves a full second of margin on a cadence that never goes
+# quiet at all.
+export BATON_QUIET_SECS=3
+write_behavior a <<'EOF'
+STEP_TRANSCRIPT=("sess-soft-busy")
+STEP_BLOCK=(1)
+STEP_BLOCK_EXIT=(143)
+EOF
+write_behavior b <<'EOF'
+STEP_EXIT=(3)
+STEP_STDOUT=("resumed after the busy stretch")
+EOF
+write_usage a 85
+start_night
+f=$(wait_for_transcript a 5)
+scenario_check "5: a's transcript appeared" $([ -n "$f" ]; echo $?)
+[ -n "$f" ] && printf '%s
+' "$COMPACT_LINE" >> "$f"
+
+# Fifteen writes, 0.3s apart: four and a half seconds of work, and never
+# more than 0.3s of silence against a 3s window. The poll interval is 0.2s,
+# so a build without the guard gets twenty-odd chances to fire and needs one.
+busy_kill=0
+i=0
+while [ "$i" -lt 15 ]; do
+  printf '%s
+' '{"type":"assistant","message":{"content":"still mid-turn after the checkpoint"}}' >> "$f"
+  sleep 0.3
+  is_dead_marked a && busy_kill=1
+  i=$((i + 1))
+done
+scenario_check "5: no handoff while the transcript kept growing (checked 15 times)"   $([ "$busy_kill" -eq 0 ]; echo $?)
+scenario_check "5: b was not launched mid-turn" $([ "$(invocation_count b)" -eq 0 ]; echo $?)
+scenario_check "5: a's child was not killed mid-turn"   $([ ! -s "$(signals_log_of a)" ]; echo $?)
+
+# Now the session goes quiet, and the SAME three facts finally hold. Asserted
+# so the phase above cannot pass by the trigger being broken outright.
+wait_for_night_exit 20
+scenario_check "5: the handoff did fire once the writing stopped" $?
+scenario_check "5: a is marked dead with reason soft after the quiet window"   $([ "$(dead_reason_of a)" = soft ]; echo $?)
+scenario_check "5: b resumed a's session once it was quiet"   $(grep -q -- "--resume sess-soft-busy" "$(fake_log)"; echo $?)
+cleanup_root
+
 unset BATON_QUIET_SECS
 scenario_end
