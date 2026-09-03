@@ -77,6 +77,12 @@
 #                               unchanged, so the pointer text, not the
 #                               number, says the stop was baton's. See
 #                               features/failover.feature for the full spec.
+#   --observe <run-id-or-dir>   run the wave-wake observer supervisor over that
+#                               run in the FOREGROUND, for a terminal launched
+#                               without PATHWAY_*. A bare id resolves under
+#                               <state>/wave-wake/<id>; anything containing a
+#                               slash is a path. --night starts one by itself
+#                               when PATHWAY_PICKUP is set.
 #
 # State lives in ~/.claude-accounts: .tally, .last, .dead/<name>
 # ("until-epoch reason"), .alive/<name> (mtime = last ALIVE probe). Two
@@ -260,6 +266,15 @@ case "${1:-}" in
     . "$SCRIPT_DIR/lib/usage.sh"
     . "$SCRIPT_DIR/lib/watch.sh"
     night_mode "$@" ;;
+  --observe)
+    # The manual half of the observer. Sources observe.sh and NOTHING else:
+    # this command watches a run, so it must not be able to start a claude
+    # child (the direction rule 5 draws, and the reason --pickup keeps its
+    # distance too). exec, not a background spawn -- the terminal that typed
+    # it IS the supervisor's terminal.
+    shift
+    . "$SCRIPT_DIR/lib/observe.sh"
+    observe_main "${1:-}" ;;
   --pickup)
     # Read-only: what did the last session leave behind. Deliberately does
     # NOT source watch.sh -- pickup answers a question about dead runs and

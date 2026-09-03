@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# tests/fixtures/bin/fake-wave-wake -- stand-in for pathway's observer
+# supervisor ($HOME/code/pathway/pathway/wave_wake.py). baton only ever pins a
+# target path and an argv, so the tests must not depend on pathway being
+# installed: this file records exactly what it was handed (its own pid, the
+# PYTHONPATH it inherited, one line per argv word) and then behaves like the
+# real supervisor does -- it stays alive until something kills it.
+#
+# Records are APPENDED, never truncated, because "the observer was started
+# exactly once across a handoff" is a claim about how many records exist.
+set -u
+out="${OBSERVE_FAKE_OUT:-/dev/null}"
+{
+  printf 'pid=%s\n' "$$"
+  printf 'pythonpath=%s\n' "${PYTHONPATH-}"
+  for a in "$@"; do printf 'arg=%s\n' "$a"; done
+} >> "$out"
+echo "observer up"
+while :; do sleep 0.2; done
