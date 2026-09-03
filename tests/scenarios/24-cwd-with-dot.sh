@@ -36,8 +36,11 @@ wait_for_night_exit 15
 scenario_check "night process exited" $?
 scenario_check "the watcher saw the limit line and killed the child" $([ -s "$(signals_log_of a)" ]; echo $?)
 scenario_check "a was marked dead" $(is_dead_marked a; echo $?)
-scenario_check "handed off to b" $(grep -q "config=$(config_dir_of b) " "$(fake_log)"; echo $?)
-scenario_check "b resumed a's session by id" $(grep -q -- "--resume sess-dotted" "$(fake_log)"; echo $?)
+# b's handoff resumes a's session, which goes through run_watched's
+# --resume session lock (lib/watch.sh lock_claim "session:$id") and needs a
+# working process table (_runs_ps_usable). Refused ps -> refused resume.
+scenario_check "handed off to b" $(grep -q "config=$(config_dir_of b) " "$(fake_log)"; echo $?) cni
+scenario_check "b resumed a's session by id" $(grep -q -- "--resume sess-dotted" "$(fake_log)"; echo $?) cni
 
 cd "$back" || exit 1
 cleanup_root

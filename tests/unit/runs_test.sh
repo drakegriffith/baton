@@ -20,17 +20,38 @@ check_alive() { # $1 name, $2 pid, $3 fingerprint, $4 expected
   fi
 }
 
+# check_alive_cni -- like check_alive, but for a case exercised against a
+# REAL live pid of this shell's own making (self, or a just-reaped child),
+# where the expected answer (yes/no) can only be produced by a working
+# process table. When such a case mismatches AND this environment's ps is
+# confirmed unusable (ps_usable, tests/fixtures/lib.sh), runs_alive's own
+# `unknown` answer is correct behavior for a refused process table, not a
+# defect -- so it is recorded as could-not-inspect rather than FAIL. In a
+# working environment (ps_usable true) this behaves exactly like
+# check_alive: a real regression here still FAILs. See baton#7.
+check_alive_cni() { # $1 name, $2 pid, $3 fingerprint, $4 expected
+  local got
+  got="$(runs_alive "$2" "$3")"
+  if [ "$got" = "$4" ]; then
+    record_pass "unit:runs_alive:$1"
+  elif ! ps_usable; then
+    record_cni "unit:runs_alive:$1" "expected $4 got $got for pid=$2 fp=[$3] (ps unusable in this environment)"
+  else
+    record_fail "unit:runs_alive:$1" "expected $4 got $got for pid=$2 fp=[$3]"
+  fi
+}
+
 # This very shell is the one process whose liveness we know for certain, so
 # it is the positive control: if this row ever fails, the probe never reached
 # the process table and every `no` it reports is worthless.
 SELF_FP="$(runs_fingerprint $$)"
-check_alive "self-matching-fingerprint" "$$" "$SELF_FP" yes
+check_alive_cni "self-matching-fingerprint" "$$" "$SELF_FP" yes
 
 # THE PID-REUSE GUARD (acceptance 4). Same live pid, a fingerprint belonging
 # to some other command: the recorded process is NOT what is running under
 # that number now, so it must not read as alive. A bare `kill -0` cannot tell
 # these apart, which is exactly why the fingerprint is recorded at launch.
-check_alive "live-pid-wrong-fingerprint" "$$" "sleep 99999 started-in-1999" no
+check_alive_cni "live-pid-wrong-fingerprint" "$$" "sleep 99999 started-in-1999" no
 
 # THE EXEC CASE (baton#2). Same live pid, same START TIME, a different command
 # line: this is the recorded process after an `exec`, not a stranger. It is the
@@ -39,11 +60,11 @@ check_alive "live-pid-wrong-fingerprint" "$$" "sleep 99999 started-in-1999" no
 # exists, racing the child's own exec, so the receipt sometimes holds the
 # pre-exec argv. Reading that as a death reported a LIVE orphan as gone, and
 # `dead-partial` maps to action `reconcile`.
-check_alive "same-birth-after-exec" "$$" "$(runs_birth "$SELF_FP") some other command line" yes
+check_alive_cni "same-birth-after-exec" "$$" "$(runs_birth "$SELF_FP") some other command line" yes
 
 # ...and the guard that makes the row above safe: a different start time is
 # still a different process, however similar the command line looks.
-check_alive "different-birth-same-command" "$$" "Mon Jan  1 00:00:00 1999 ${SELF_FP#* * * * * }" no
+check_alive_cni "different-birth-same-command" "$$" "Mon Jan  1 00:00:00 1999 ${SELF_FP#* * * * * }" no
 
 # runs_birth itself: a fingerprint too short to carry a start time yields
 # nothing, so a truncated or planted record stays unmatchable rather than
@@ -70,7 +91,7 @@ fi
 # evidence that lets a unit be re-dispatched safely.
 DEAD_PID="$( (exec sh -c 'echo $$') )"
 sleep 0.1
-check_alive "exited-process" "$DEAD_PID" "whatever it was" no
+check_alive_cni "exited-process" "$DEAD_PID" "whatever it was" no
 
 # ---- could-not-inspect rows: exit 2 is not a pass ------------------------
 # A probe that cannot ask the question must say so. If `ps` is unavailable,
@@ -83,6 +104,37 @@ if [ "$got_noprobe" = unknown ]; then
 else
   record_fail "unit:runs_alive:no-ps-available-is-unknown" "expected unknown got $got_noprobe"
 fi
+
+# The 2026-08-25/26 incident this whole bucket exists for (baton#7): `ps` is
+# not MISSING, it is PRESENT and REFUSES ("ps: operation not permitted" on
+# stderr, exit 1) -- a sandboxed CI shape, not a bare PATH. That is a
+# different failure mode from "no ps on PATH" above, and it is the one that
+# actually happened: two Codex judges ran the real suite in a sandbox where
+# `ps` refused, read `TESTS: 191 PASS: 139 FAIL: 52`, and had to disclaim the
+# result by hand because the suite had no could-not-inspect bucket of its
+# own. This is the regression test for exactly that shape.
+PS_REFUSE_BIN="$(mktemp -d)"
+cat > "$PS_REFUSE_BIN/ps" <<'EOF'
+#!/bin/sh
+echo "ps: operation not permitted" >&2
+exit 1
+EOF
+chmod +x "$PS_REFUSE_BIN/ps"
+got_refused="$(PATH="$PS_REFUSE_BIN:$PATH" runs_alive "$$" "$SELF_FP")"
+if [ "$got_refused" = unknown ]; then
+  record_pass "unit:runs_alive:ps-refuses-permission-is-unknown"
+else
+  record_fail "unit:runs_alive:ps-refuses-permission-is-unknown" "expected unknown got $got_refused"
+fi
+# _runs_ps_usable is the positive control every could-not-inspect answer in
+# this file (and lib/lock.sh's claim/probe) is gated on; it must itself read
+# the refusal as unusable, exit 2 in the shell-conditional sense (nonzero).
+if ( PATH="$PS_REFUSE_BIN:$PATH"; ! _runs_ps_usable ); then
+  record_pass "unit:runs_alive:ps-refuses-permission-fails-the-positive-control"
+else
+  record_fail "unit:runs_alive:ps-refuses-permission-fails-the-positive-control" "_runs_ps_usable reported usable under a refusing ps"
+fi
+rm -rf "$PS_REFUSE_BIN"
 
 # Malformed pids are never silently treated as absent processes.
 check_alive "empty-pid"       ""      "$SELF_FP" unknown

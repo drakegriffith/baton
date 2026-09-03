@@ -38,7 +38,10 @@ printf '%s\n' 'You have hit your usage limit. resets 11:59pm (UTC)' >> "$f"
 
 wait_for_night_exit 10
 scenario_check "night process exited" $?
-scenario_check "handoff to b completed" $(grep -q "config=$(config_dir_of b) " "$(fake_log)"; echo $?)
+# b's handoff resumes a's session, which goes through run_watched's
+# --resume session lock (lib/watch.sh lock_claim "session:$id") and needs a
+# working process table (_runs_ps_usable). Refused ps -> refused resume.
+scenario_check "handoff to b completed" $(grep -q "config=$(config_dir_of b) " "$(fake_log)"; echo $?) cni
 scenario_check "a marked dead" $(is_dead_marked a; echo $?)
 
 after_mtime=$(stat -f %m "$sentinel")

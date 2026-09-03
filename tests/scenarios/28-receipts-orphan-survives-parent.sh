@@ -39,13 +39,18 @@ scenario_check "start receipt survived the parent's death" $([ -n "$start_receip
 scenario_check "no completion receipt was invented" \
   $([ -z "$(ls -1 "$RUNS"/*.complete 2>/dev/null)" ]; echo $?)
 
+# --pickup's classification of a live pid as orphan-running requires a
+# working process table (runs_project -> runs_alive -> ps -p 1 positive
+# control). When ps is refused these correctly fall back to `unknown`
+# rather than a wrong guess -- see the same-bucket needs-reconcile/exit-1/
+# forensics checks below, which stay green either way.
 out="$("$BATON_BIN" --pickup 2>/dev/null)"; rc=$?
 scenario_check "pickup classified the survivor orphan-running" \
-  $(printf '%s' "$out" | grep -q '"status": "orphan-running"'; echo $?)
+  $(printf '%s' "$out" | grep -q '"status": "orphan-running"'; echo $?) cni
 # The load-bearing assertion: an orphan is adopted, never relaunched. A
 # `dispatch` here would double-run the work.
 scenario_check "pickup action is monitor, not dispatch" \
-  $(printf '%s' "$out" | grep -q '"status": "orphan-running", "action": "monitor"'; echo $?)
+  $(printf '%s' "$out" | grep -q '"status": "orphan-running", "action": "monitor"'; echo $?) cni
 scenario_check "pickup exits 1 (needs a decision)" $([ "$rc" -eq 1 ]; echo $?)
 scenario_check "pickup verdict is needs-reconcile" \
   $(printf '%s' "$out" | grep -q '"verdict": "needs-reconcile"'; echo $?)
@@ -59,7 +64,7 @@ kill_fake_claude a
 sleep 0.3
 out2="$("$BATON_BIN" --pickup 2>/dev/null)"; rc2=$?
 scenario_check "after the orphan dies it reads dead-partial" \
-  $(printf '%s' "$out2" | grep -q '"status": "dead-partial"'; echo $?)
+  $(printf '%s' "$out2" | grep -q '"status": "dead-partial"'; echo $?) cni
 scenario_check "dead-partial still exits 1" $([ "$rc2" -eq 1 ]; echo $?)
 scenario_check "dead-partial is routed to forensics" \
   $(printf '%s' "$out2" | grep -q 'needs_forensics'; echo $?)

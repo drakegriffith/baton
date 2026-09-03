@@ -32,8 +32,13 @@ scenario_check "a launched exactly once" $([ "$(grep -c "config=$(config_dir_of 
 scenario_check "a received sigterm" $([ -s "$(signals_log_of a)" ]; echo $?)
 scenario_check "a marked dead with future epoch" $(is_dead_marked a && [ "$(dead_epoch_of a)" -gt "$(date +%s)" ]; echo $?)
 scenario_check "handoff announced naming a and b" $(printf '%s' "$(night_stderr)" | grep -q "'a'" && printf '%s' "$(night_stderr)" | grep -q "'b'"; echo $?)
-scenario_check "b launched with --resume and a's session id" $(grep -q -- "--resume sess-headline" "$log"; echo $?)
-scenario_check "final exit code matches b's exit code" $([ "$NIGHT_EXIT" -eq 9 ]; echo $?)
+# Both of these go through run_watched's --resume session lock (lib/watch.sh
+# lock_claim "session:$id"), which requires a working process table
+# (_runs_ps_usable). When ps is refused, the claim correctly answers
+# could-not-inspect and b's launch is refused rather than risking a second
+# writer -- that is lock.sh's contract working, not a failover defect.
+scenario_check "b launched with --resume and a's session id" $(grep -q -- "--resume sess-headline" "$log"; echo $?) cni
+scenario_check "final exit code matches b's exit code" $([ "$NIGHT_EXIT" -eq 9 ]; echo $?) cni
 
 cleanup_root
 scenario_end

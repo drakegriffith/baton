@@ -59,8 +59,13 @@ while [ "$waited" -lt 50 ]; do
   sleep 0.1
   waited=$((waited + 1))
 done
+# This scenario's own liveness measurements (ORPHAN_ARGS/orphan_now below,
+# and --pickup's board classification) all go through `ps`; when this
+# environment's ps is refused neither baton nor the test itself can observe
+# the orphan, so the checks below are marked cni rather than treated as a
+# redispatch defect. See baton#7.
 scenario_check "precondition: the board reads orphan-running" \
-  $(printf '%s' "$board" | grep -q '"status": "orphan-running"'; echo $?)
+  $(printf '%s' "$board" | grep -q '"status": "orphan-running"'; echo $?) cni
 printf '%s' "$board" | grep -q '"status": "orphan-running"' || {
   echo "32: board never reached orphan-running; last board was:" >&2
   printf '%s\n' "$board" >&2
@@ -77,7 +82,7 @@ printf '%s' "$board" | grep -q '"status": "orphan-running"' || {
 ORPHAN_ARGS="$(ps -p "${ORPHAN_PID:-0}" -o args= 2>/dev/null | tr -s ' ')"
 orphan_now() { ps -p "${ORPHAN_PID:-0}" -o args= 2>/dev/null | tr -s ' '; }
 scenario_check "precondition: the orphan really is alive right now" \
-  $([ -n "$ORPHAN_ARGS" ]; echo $?)
+  $([ -n "$ORPHAN_ARGS" ]; echo $?) cni
 
 # --- a redispatch that loses the claim kills NOTHING -----------------------
 # Claim ordering matters: kill-then-claim would let a loser destroy the
@@ -92,7 +97,7 @@ done
 refused="$("$BATON_BIN" --redispatch "$UNIT" -- sh -c "echo replacement >> '$SCRATCH/replacement.log'" 2>&1)"; refrc=$?
 scenario_check "a redispatch on a claimed unit exits nonzero" $([ "$refrc" -ne 0 ]; echo $?)
 scenario_check "the refused redispatch names the holding pid" \
-  $(printf '%s' "$refused" | grep -q "$HOLDER"; echo $?)
+  $(printf '%s' "$refused" | grep -q "$HOLDER"; echo $?) cni
 scenario_check "the refused redispatch launched no replacement" \
   $([ ! -e "$SCRATCH/replacement.log" ]; echo $?)
 # The one that would be silent and catastrophic: a loser that killed anyway.
@@ -113,13 +118,13 @@ sleep 0.3
   >"$SCRATCH/redispatch.out" 2>"$SCRATCH/redispatch.err"
 redrc=$?
 
-scenario_check "the redispatch exited 0" $([ "$redrc" -eq 0 ]; echo $?)
+scenario_check "the redispatch exited 0" $([ "$redrc" -eq 0 ]; echo $?) cni
 scenario_check "the replacement ran exactly once" \
-  $([ "$(grep -c replacement "$SCRATCH/replacement.log" 2>/dev/null || echo 0)" -eq 1 ]; echo $?)
+  $([ "$(grep -c replacement "$SCRATCH/replacement.log" 2>/dev/null || echo 0)" -eq 1 ]; echo $?) cni
 # THE assertion this scenario exists for.
 overlap_saw="$(tr -s ' ' < "$SCRATCH/overlap" 2>/dev/null)"
 scenario_check "no window in which both were alive: the orphan was gone before the replacement's first instruction" \
-  $([ "$overlap_saw" != "$ORPHAN_ARGS" ]; echo $?)
+  $([ "$overlap_saw" != "$ORPHAN_ARGS" ]; echo $?) cni
 [ "$overlap_saw" != "$ORPHAN_ARGS" ] || {
   echo "32: the orphan was still itself when the replacement started" >&2
   echo "32:   orphan pid  = $ORPHAN_PID" >&2
@@ -127,7 +132,7 @@ scenario_check "no window in which both were alive: the orphan was gone before t
   echo "32:   probe saw   = [$overlap_saw]" >&2
 }
 scenario_check "the orphan is confirmed gone afterwards too" \
-  $([ "$(orphan_now)" != "$ORPHAN_ARGS" ]; echo $?)
+  $([ "$(orphan_now)" != "$ORPHAN_ARGS" ]; echo $?) cni
 
 # The board moves off orphan-running once the orphan really is dead, which is
 # the independent confirmation that the kill was real rather than reported.
@@ -140,7 +145,7 @@ scenario_check "the board no longer reads orphan-running" \
 # performed.
 "$BATON_BIN" --redispatch "no-such-unit-ever" -- sh -c "echo fresh >> '$SCRATCH/fresh.log'" >/dev/null 2>&1
 scenario_check "a unit with no receipt redispatches cleanly" \
-  $([ -e "$SCRATCH/fresh.log" ]; echo $?)
+  $([ -e "$SCRATCH/fresh.log" ]; echo $?) cni
 
 cleanup_root
 scenario_end

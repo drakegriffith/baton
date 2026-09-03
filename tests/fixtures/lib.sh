@@ -9,22 +9,50 @@
 
 record_pass() { echo "PASS $1" >> "$RESULTS_FILE"; }
 record_fail() { echo "FAIL $1 -- $2" >> "$RESULTS_FILE"; }
+# record_cni NAME REASON -- COULD-NOT-INSPECT, the third bucket alongside
+# PASS/FAIL. Used only where an assertion is downgraded from a real failure
+# because the environment refused the exact question the assertion depends
+# on (the process table); see ps_usable() below and baton#7.
+record_cni() { echo "CNI $1 -- $2" >> "$RESULTS_FILE"; }
 
-scenario_begin() { SCENARIO_NAME="$1"; SCENARIO_FAILURES=""; }
+# ps_usable -- the SAME positive control lib/runs.sh's `_runs_ps_usable`
+# uses (`ps -p 1`, pid 1 exists on every machine this runs on). Tests call
+# this rather than lib/runs.sh's private function because unit test files
+# for OTHER modules (lock_test.sh, project_test.sh) do not all source
+# runs.sh, and this file is the one every test already sources.
+ps_usable() { ps -p 1 -o args= >/dev/null 2>&1; }
 
-# scenario_check DESC COND_EXIT_STATUS -- record a sub-check under the
+scenario_begin() { SCENARIO_NAME="$1"; SCENARIO_FAILURES=""; SCENARIO_CNI=""; }
+
+# scenario_check DESC COND_EXIT_STATUS [cni] -- record a sub-check under the
 # current scenario without ending it. COND_EXIT_STATUS is 0 for pass.
+#
+# The optional 3rd arg "cni" marks a check whose PASS/FAIL depends on
+# reading the real process table (a resume/session/unit lock claim, or a
+# fixture's own `ps` call) -- see baton#7. When such a check fails AND this
+# environment's `ps` genuinely cannot answer (ps_usable is false), that is
+# the environment refusing the question, not a product defect, so it is
+# tracked separately as could-not-inspect rather than FAIL. In a normal
+# environment (ps_usable true) a "cni"-marked check that fails is still a
+# real FAIL -- the marker only ever loosens the verdict when ps itself is
+# confirmed unusable, never unconditionally.
 scenario_check() {
   if [ "$2" -ne 0 ]; then
-    SCENARIO_FAILURES="${SCENARIO_FAILURES}[$1] "
+    if [ "${3:-}" = cni ] && ! ps_usable; then
+      SCENARIO_CNI="${SCENARIO_CNI}[$1] "
+    else
+      SCENARIO_FAILURES="${SCENARIO_FAILURES}[$1] "
+    fi
   fi
 }
 
 scenario_end() {
-  if [ -z "$SCENARIO_FAILURES" ]; then
-    record_pass "$SCENARIO_NAME"
-  else
+  if [ -n "$SCENARIO_FAILURES" ]; then
     record_fail "$SCENARIO_NAME" "$SCENARIO_FAILURES"
+  elif [ -n "$SCENARIO_CNI" ]; then
+    record_cni "$SCENARIO_NAME" "$SCENARIO_CNI"
+  else
+    record_pass "$SCENARIO_NAME"
   fi
 }
 

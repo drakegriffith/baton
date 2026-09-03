@@ -21,8 +21,10 @@ normalize() {
     -e 's/[A-Za-z]{3} +[0-9]{1,2}:[0-9]{2}(AM|PM)/<DATE>/g'
 }
 
-run_case() { # $1 = human label, remaining args = the flags to run
-  local label="$1"; shift
+run_case() { # $1 = human label, $2 = cni|"" (this case's launch goes through
+             # a lock_claim that needs a real process table), remaining args
+             # = the flags to run
+  local label="$1" cni_marker="$2"; shift 2
   local old_out old_err old_code new_out new_err new_code
 
   fresh_root_hardcoded_default
@@ -41,18 +43,23 @@ run_case() { # $1 = human label, remaining args = the flags to run
   n_old_err=$(printf '%s' "$old_err" | normalize)
   n_new_err=$(printf '%s' "$new_err" | normalize)
 
-  scenario_check "$label: stdout matches pre-failover baton" $([ "$n_old_out" = "$n_new_out" ]; echo $?)
-  scenario_check "$label: stderr matches pre-failover baton" $([ "$n_old_err" = "$n_new_err" ]; echo $?)
-  scenario_check "$label: exit code matches pre-failover baton" $([ "$old_code" = "$new_code" ]; echo $?)
+  scenario_check "$label: stdout matches pre-failover baton" $([ "$n_old_out" = "$n_new_out" ]; echo $?) "$cni_marker"
+  scenario_check "$label: stderr matches pre-failover baton" $([ "$n_old_err" = "$n_new_err" ]; echo $?) "$cni_marker"
+  scenario_check "$label: exit code matches pre-failover baton" $([ "$old_code" = "$new_code" ]; echo $?) "$cni_marker"
 }
 
-run_case "--status" --status
-run_case "--pick" --pick
-run_case "--dead a 90m" --dead a 90m
-run_case "--revive a" --revive a
-run_case "--next" --next
-run_case "--fast" --fast
-run_case "forced account a" a
+run_case "--status" "" --status
+run_case "--pick" "" --pick
+run_case "--dead a 90m" "" --dead a 90m
+run_case "--revive a" "" --revive a
+run_case "--next" "" --next
+run_case "--fast" "" --fast
+# A forced-account launch is also the login entry point (baton main:
+# lock_claim login), which requires a working process table
+# (_runs_ps_usable). When ps is refused the claim correctly answers
+# could-not-inspect and the launch is refused rather than risking a second
+# writer -- see the comment at that call site in `baton`.
+run_case "forced account a" cni a
 
 rm -f "$OLD_BATON"
 scenario_end

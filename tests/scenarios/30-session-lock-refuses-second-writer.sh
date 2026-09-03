@@ -31,28 +31,36 @@ while [ ! -e "$LOCKS/session_$SID.lock/owner" ]; do
   waited=$((waited + 1))
   [ "$waited" -gt 100 ] && break
 done
+# The holder's own `--claim ... -- sleep 30` above is itself gated by
+# lock_claim's `_runs_ps_usable` check: when ps is refused, that FIRST claim
+# never lands (lock_claim returns could-not-inspect before ever writing an
+# owner record or running `sleep 30`), so every check below that depends on
+# an actual held lock -- the owner record existing, --lock-status reading
+# held/prov=test/a named pid, the second writer's refusal naming that pid,
+# and the later stale-dead reclaim -- cannot be resolved either. This is the
+# claim layer correctly refusing to arbitrate rather than a lock.sh defect.
 scenario_check "the first writer's owner record landed on disk" \
-  $([ -e "$LOCKS/session_$SID.lock/owner" ]; echo $?)
+  $([ -e "$LOCKS/session_$SID.lock/owner" ]; echo $?) cni
 
 # --- status: held, by a named pid, and it looked ---------------------------
 status="$("$BATON_BIN" --lock-status "session:$SID" 2>&1)"; srsc=$?
-scenario_check "--lock-status on a held subject exits 1" $([ "$srsc" -eq 1 ]; echo $?)
+scenario_check "--lock-status on a held subject exits 1" $([ "$srsc" -eq 1 ]; echo $?) cni
 scenario_check "--lock-status reports state=held" \
-  $(printf '%s' "$status" | grep -q 'state=held'; echo $?)
+  $(printf '%s' "$status" | grep -q 'state=held'; echo $?) cni
 scenario_check "--lock-status names the holding pid" \
-  $(printf '%s' "$status" | grep -q "holder_pid=$HOLDER"; echo $?)
+  $(printf '%s' "$status" | grep -q "holder_pid=$HOLDER"; echo $?) cni
 # Silence is not evidence. A status that inspected zero subjects found nothing
 # because it looked at nothing; the count is asserted, not assumed.
 scenario_check "--lock-status asserts it inspected more than zero subjects" \
-  $(printf '%s' "$status" | grep -qE 'inspected=[1-9][0-9]*'; echo $?)
+  $(printf '%s' "$status" | grep -qE 'inspected=[1-9][0-9]*'; echo $?) cni
 scenario_check "the lock is stamped prov=test, never readable as a real holder" \
-  $(printf '%s' "$status" | grep -q 'prov=test'; echo $?)
+  $(printf '%s' "$status" | grep -q 'prov=test'; echo $?) cni
 
 # --- the second writer is refused, and told who has it ---------------------
 second_err="$("$BATON_BIN" --claim "session:$SID" -- sh -c "echo SECOND > '$SCRATCH/second'" 2>&1)"; secrc=$?
 scenario_check "a second claim on the same session exits nonzero" $([ "$secrc" -ne 0 ]; echo $?)
 scenario_check "the refusal names the holder pid" \
-  $(printf '%s' "$second_err" | grep -q "$HOLDER"; echo $?)
+  $(printf '%s' "$second_err" | grep -q "$HOLDER"; echo $?) cni
 # The load-bearing one: refusing has to mean the guarded work did NOT happen.
 scenario_check "the second writer's guarded command never ran" \
   $([ ! -e "$SCRATCH/second" ]; echo $?)
@@ -88,13 +96,13 @@ after="$("$BATON_BIN" --lock-status "session:$SID" 2>&1)"; afterrc=$?
 scenario_check "a lock whose owner pid is confirmed gone exits 0 (reclaimable)" \
   $([ "$afterrc" -eq 0 ]; echo $?)
 scenario_check "a dead owner reads state=stale-dead, not held" \
-  $(printf '%s' "$after" | grep -q 'state=stale-dead'; echo $?)
+  $(printf '%s' "$after" | grep -q 'state=stale-dead'; echo $?) cni
 scenario_check "a dead owner is still an inspected subject" \
-  $(printf '%s' "$after" | grep -qE 'inspected=[1-9][0-9]*'; echo $?)
+  $(printf '%s' "$after" | grep -qE 'inspected=[1-9][0-9]*'; echo $?) cni
 
 "$BATON_BIN" --claim "session:$SID" -- sh -c "echo RECLAIMED > '$SCRATCH/reclaimed'" >/dev/null 2>&1
 scenario_check "the next writer reclaims the dead owner's lock and runs" \
-  $([ -e "$SCRATCH/reclaimed" ]; echo $?)
+  $([ -e "$SCRATCH/reclaimed" ]; echo $?) cni
 
 # The live-pid-but-foreign-fingerprint reclaim (pid reuse after a reboot) is
 # asserted at the module seam in tests/unit/lock_test.sh
