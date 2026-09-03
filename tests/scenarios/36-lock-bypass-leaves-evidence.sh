@@ -16,7 +16,7 @@ scenario_begin "36-lock-bypass-leaves-evidence"
 fresh_root
 export BATON_LOCK_PROV=test
 
-LOCKS="$BATON_ACCOUNTS_ROOT/.locks"
+LOCKS="$(baton_lock_dir)"
 UNIT="night-20260825T193000Z-9999-a"
 DISPATCH_LOG="$SCRATCH/dispatches.log"
 : > "$DISPATCH_LOG"
@@ -118,7 +118,7 @@ start2="$(ls "$BATON_ACCOUNTS_ROOT/.runs"/*.start 2>/dev/null | head -1)"
 scenario_check "a receipt written with the guard ON carries bypassed=no" \
   $(grep -q '^bypassed=no' "$start2" 2>/dev/null; echo $?)
 scenario_check "a guarded run left no bypass trace on disk" \
-  $([ ! -e "$BATON_ACCOUNTS_ROOT/.locks/bypass.log" ]; echo $?)
+  $([ ! -e "$(baton_lock_dir)/bypass.log" ]; echo $?)
 
 cleanup_root
 scenario_end

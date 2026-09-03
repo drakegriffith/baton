@@ -15,7 +15,7 @@ fresh_root
 # Every lock this scenario causes to be written is a self-test lock.
 export BATON_LOCK_PROV=test
 
-LOCKS="$BATON_ACCOUNTS_ROOT/.locks"
+LOCKS="$(baton_lock_dir)"
 SID="sess-2026-08-25-abc"
 
 # --- the first writer ------------------------------------------------------

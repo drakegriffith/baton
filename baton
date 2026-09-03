@@ -88,7 +88,7 @@
 #   BATON_EXCLUDE            account name auto-pick must skip (any mode)
 #   BATON_WATCH_INTERVAL     --night poll interval, seconds (default: 5)
 #   BATON_MAX_HANDOFFS       --night handoff cap per run (default: 3)
-#   BATON_LOCK_DIR           lock root (default: <accounts root>/.locks)
+#   BATON_LOCK_DIR           lock root (default: ${XDG_CACHE_HOME:-$HOME/.cache}/baton/locks-<hash of ~/.claude>)
 #   BATON_LOCK_DISABLE=1     turn the single-writer guard OFF. It exists
 #                            because a guard that strands an operator with no
 #                            way through is a worse failure than the one it
@@ -285,6 +285,7 @@ case "${1:-}" in
     lock_probe "$1"; lock_rc=$?
     printf 'subject=%s state=%s holder_pid=%s prov=%s inspected=%s\n' \
       "$1" "$LOCK_STATE" "${LOCK_HOLDER_PID:-}" "${LOCK_HOLDER_PROV:-}" "$LOCK_INSPECTED"
+    [ "$lock_rc" -eq 2 ] && _lock_cni "$1" probe-could-not-inspect
     exit "$lock_rc" ;;
   --claim)
     # The arbitration `--pickup` deliberately does not do. The board is a
@@ -358,7 +359,12 @@ case "${1:-}" in
       # the process start time, and pid+start-time is the identity lock.sh
       # matches on, so the claim stays valid for exactly as long as the
       # launched session lives and goes stale the moment it dies.
-      lock_claim login || exit $?
+      lock_claim login; lock_rc=$?
+      if [ "$lock_rc" -eq 2 ]; then
+        _lock_cni login claim-could-not-inspect
+        exit 2
+      fi
+      [ "$lock_rc" -ne 0 ] && exit "$lock_rc"
       launch "$acct" "$@"
     else
       need_lock

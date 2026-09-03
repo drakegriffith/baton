@@ -122,11 +122,11 @@ EOF
 "$BATON_BIN" a >/dev/null 2>&1 &
 HOLDER=$!
 waited=0
-while [ ! -e "$BATON_ACCOUNTS_ROOT/.locks/login.lock/owner" ]; do
+while [ ! -e "$(baton_lock_dir)/login.lock/owner" ]; do
   sleep 0.1; waited=$((waited + 1)); [ "$waited" -gt 100 ] && break
 done
 scenario_check "a login lock is held before the refusal is provoked" \
-  $([ -e "$BATON_ACCOUNTS_ROOT/.locks/login.lock/owner" ]; echo $?)
+  $([ -e "$(baton_lock_dir)/login.lock/owner" ]; echo $?)
 
 script -q "$SCRATCH/pty2.log" /bin/sh -c \
   "tty; '$BATON_BIN' a >'$SCRATCH/refused.out' 2>'$SCRATCH/refused.err'" \

@@ -74,12 +74,51 @@
 #   indistinguishable. The lock layer's own now carries
 #   `lock-result=could-not-inspect` on stderr (_lock_cni). The exit code is
 #   unchanged because it is written into this issue's acceptance criteria.
+#
+# LOCK ROOT IS MACHINE-WIDE, KEYED TO THE RESOLVED CONFIG DIRECTORY (baton#12)
+#   The root used to fall back under BATON_ACCOUNTS_ROOT, which made two
+#   different accounts roots that both symlinked their primary account to the
+#   same $HOME/.claude use TWO separate lock roots. Two concurrent
+#   `baton a --resume <id>` then both wrote the primary directory, so the
+#   single-writer guard was silently bypassed. The fix keys the default root
+#   to the PHYSICAL path of the resolved config directory ($HOME/.claude for
+#   the primary account), hashed and placed under ${XDG_CACHE_HOME:-$HOME/.cache}/baton
+#   so tests and normal runs never write lock state into the live config
+#   directory and every login session of one user resolves the same root. The
+#   hashed path is still machine-wide for the same physical config dir, and
+#   BATON_LOCK_DIR remains an explicit override for operators who need to place
+#   or inspect the root themselves.
 
 # lock_dir -- where owner records live. Honors BATON_LOCK_DIR, then falls back
-# under BATON_ACCOUNTS_ROOT so a test that redirects the accounts root
-# redirects the locks by construction (half-isolation reads as isolation).
+# to a hash of the resolved primary config directory under $HOME/.cache/baton so
+# the root is machine-wide for one physical config dir (baton#12).
 lock_dir() {
-  printf '%s\n' "${BATON_LOCK_DIR:-${BATON_ACCOUNTS_ROOT:-$HOME/.claude-accounts}/.locks}"
+  if [ -n "${BATON_LOCK_DIR:-}" ]; then
+    printf '%s\n' "$BATON_LOCK_DIR"
+    return
+  fi
+  local phys hash
+  # Fallback resolves the PARENT, not the literal string: before ~/.claude
+  # exists (fresh machine, pre-login) a HOME that traverses a symlink (macOS
+  # /tmp -> /private/tmp) would otherwise hash one path now and another the
+  # moment the directory appears, which is two roots for one user
+  # (verify-lock2, 2026-08-26).
+  phys="$(cd "$HOME/.claude" 2>/dev/null && pwd -P)" \
+    || phys="$(cd "$HOME" 2>/dev/null && pwd -P)/.claude" \
+    || phys="$HOME/.claude"
+  if command -v shasum >/dev/null 2>&1; then
+    hash="$(printf '%s' "$phys" | shasum -a 256 | awk '{print $1}')"
+  elif command -v sha256sum >/dev/null 2>&1; then
+    hash="$(printf '%s' "$phys" | sha256sum | awk '{print $1}')"
+  else
+    hash="$(printf '%s' "$phys" | cksum | awk '{print $1}')"
+  fi
+  # Not under ${TMPDIR}: on macOS TMPDIR is per login session (a GUI terminal
+  # gets /var/folders/..., an ssh session gets /tmp), which would recreate
+  # the two-roots gap across session types. $HOME is the same for every
+  # session of one user, and the cache dir keeps lock state out of the live
+  # config directory.
+  printf '%s\n' "${XDG_CACHE_HOME:-$HOME/.cache}/baton/locks-${hash}"
 }
 
 _lock_say() { echo "baton: $*" >&2; }
@@ -286,6 +325,16 @@ _lock_probe_raw() {
   if [ ! -e "$owner" ]; then
     # Nothing on disk for this subject. Determinate, and honestly zero: there
     # was no record to read.
+    # EXCEPTION: a gate directory with no owner means a claimer won the gate
+    # and died before writing the owner record. That is not a free lock; it is
+    # a state the reporter cannot answer safely. Report it as could-not-inspect
+    # so no caller reads "free" and launches into a generation that may still
+    # be owned (baton#12 gap 3).
+    if [ -d "$d" ] && ls "$d" 2>/dev/null | grep -q '^g-'; then
+      LOCK_STATE=could-not-inspect
+      LOCK_INSPECTED=1
+      return 2
+    fi
     LOCK_STATE=free
     LOCK_INSPECTED=0
     return 0
@@ -587,7 +636,7 @@ lock_guard_launch() {
 # Read-only on purpose: a reporter that reclaims what it reports cannot be
 # trusted about what was there before it looked.
 lock_report() {
-  local root d subject n=0
+  local root d subject n=0 orphan=0
   root="$(lock_dir)"
   if ! _lock_root_usable "$root"; then
     _lock_cni "(every subject)" lock-root-unusable
@@ -597,8 +646,18 @@ lock_report() {
   if [ -d "$root" ]; then
     for d in "$root"/*.lock; do
       [ -d "$d" ] || continue
-      [ -e "$d/owner" ] || continue
       subject="$(basename "$d")"; subject="${subject%.lock}"
+      if [ ! -e "$d/owner" ]; then
+        # A gate directory with no owner is a crash window, not a free subject.
+        # Count it and report it as could-not-inspect; the whole board answer
+        # must not be "found zero subjects" while an orphan gate exists.
+        if ls "$d" 2>/dev/null | grep -q '^g-'; then
+          printf '%-52s %-18s %-10s %s\n' "$subject" "could-not-inspect" "-" "-"
+          n=$((n + 1))
+          orphan=1
+        fi
+        continue
+      fi
       lock_probe "$subject" >/dev/null 2>&1
       printf '%-52s %-18s %-10s %s\n' \
         "$subject" "$LOCK_STATE" "${LOCK_HOLDER_PID:--}" "${LOCK_HOLDER_PROV:--}"
@@ -606,6 +665,10 @@ lock_report() {
     done
   fi
   printf 'baton: inspected %s lock subject(s) under %s\n' "$n" "$root"
+  if [ "$orphan" -ne 0 ]; then
+    _lock_cni "(one or more subjects)" gate-orphan
+    return 2
+  fi
   [ "$n" -gt 0 ] || return 1
   return 0
 }

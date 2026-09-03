@@ -33,11 +33,11 @@ SID="sess-contested"
 "$BATON_BIN" --claim "session:$SID" -- sleep 30 >/dev/null 2>&1 &
 HOLDER=$!
 waited=0
-while [ ! -e "$BATON_ACCOUNTS_ROOT/.locks/session_$SID.lock/owner" ]; do
+while [ ! -e "$(baton_lock_dir)/session_$SID.lock/owner" ]; do
   sleep 0.1; waited=$((waited + 1)); [ "$waited" -gt 100 ] && break
 done
 scenario_check "the contested session lock is held before --night starts" \
-  $([ -e "$BATON_ACCOUNTS_ROOT/.locks/session_$SID.lock/owner" ]; echo $?)
+  $([ -e "$(baton_lock_dir)/session_$SID.lock/owner" ]; echo $?)
 
 write_behavior a <<'EOF'
 STEP_EXIT=(0)
@@ -102,11 +102,11 @@ EOF
 "$BATON_BIN" a >"$SCRATCH/login1.out" 2>"$SCRATCH/login1.err" &
 LOGIN1=$!
 waited=0
-while [ ! -e "$BATON_ACCOUNTS_ROOT/.locks/login.lock/owner" ]; do
+while [ ! -e "$(baton_lock_dir)/login.lock/owner" ]; do
   sleep 0.1; waited=$((waited + 1)); [ "$waited" -gt 100 ] && break
 done
 scenario_check "the first login flow took the global login lock" \
-  $([ -e "$BATON_ACCOUNTS_ROOT/.locks/login.lock/owner" ]; echo $?)
+  $([ -e "$(baton_lock_dir)/login.lock/owner" ]; echo $?)
 
 # The exec has replaced baton's command line with claude's. Only pid + start
 # time still identify the holder; a fingerprint match on the command line

@@ -121,6 +121,22 @@ write_behavior() {
   cat > "$dir/.fake-behavior"
 }
 
+# baton_lock_dir -- the default lock root for the current $HOME, matching
+# lib/lock.sh's lock_dir() when BATON_LOCK_DIR is unset. Scenarios that plant
+# or inspect on-disk lock state use this instead of guessing the hash.
+baton_lock_dir() {
+  local phys hash
+  phys="$(cd "$HOME/.claude" 2>/dev/null && pwd -P)" || phys="$HOME/.claude"
+  if command -v shasum >/dev/null 2>&1; then
+    hash="$(printf '%s' "$phys" | shasum -a 256 | awk '{print $1}')"
+  elif command -v sha256sum >/dev/null 2>&1; then
+    hash="$(printf '%s' "$phys" | sha256sum | awk '{print $1}')"
+  else
+    hash="$(printf '%s' "$phys" | cksum | awk '{print $1}')"
+  fi
+  printf '%s\n' "${XDG_CACHE_HOME:-$HOME/.cache}/baton/locks-${hash}"
+}
+
 fake_log() { echo "$BATON_ACCOUNTS_ROOT/.fake-claude.log"; }
 signals_log_of() { echo "$(config_dir_of "$1")/.fake-signals.log"; }
 invocation_count_file_of() { echo "$(config_dir_of "$1")/.fake-invocations"; }
