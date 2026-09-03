@@ -36,6 +36,15 @@ BATON_NIGHT_STOP_EXIT=75
 ALIVE_TTL=900
 PROBE_TIMEOUT=90
 DEFAULT_DEAD=5h
+# How long a PROACTIVELY handed-off account stands down for when its own
+# signal file did not name a reset. Same shape and same default as
+# DEFAULT_DEAD -- it is the same five-hour window -- but a separate constant,
+# because the two answer different questions ("the server refused us" versus
+# "we left while it still worked") and an operator tuning one must not
+# silently move the other. night_knobs validates it as a duration before any
+# child is launched, so parse_duration can never see garbage from it at the
+# moment a mark is written.
+SOFT_DEAD="${BATON_SOFT_DEAD:-5h}"
 
 # --- the handoff log: the one channel allowed to carry a runnable command ---
 #
@@ -364,12 +373,19 @@ parse_duration() { # 90m / 5h / 3d / raw seconds -> seconds
   echo $(( n * mult ))
 }
 
-# mark_dead_for_class -- the ONE place that turns a LIMIT/AUTH classification
-# plus its raw source text into a dead-until mark. Shared by probe() (text =
-# probe reply) and the --night watcher (text = the matched transcript line),
-# so the two call sites can never drift on WHAT a mark means, only on WHERE
-# the text came from (D3/D5). A class other than LIMIT/AUTH is a no-op --
-# UNKNOWN is never actionable.
+# mark_dead_for_class -- the ONE place that turns a classification plus its
+# raw source text into a dead-until mark. Shared by probe() (text = probe
+# reply), the --night watcher's LIMIT/AUTH path (text = the matched
+# transcript line) and its SOFT path (text = the reset epoch the account's
+# own usage signal reported), so the call sites can never drift on WHAT a
+# mark means, only on WHERE the text came from (D3/D5/D8). A class outside
+# LIMIT/AUTH/SOFT is a no-op -- UNKNOWN is never actionable.
+#
+# SOFT is a mark of the same KIND (an account not to pick again tonight) with
+# a different cause, and the reason word on disk is what tells a morning
+# reader which happened: `soft` means baton left while that account still
+# worked, so a human who wants it back reaches for --revive rather than
+# waiting on a server.
 mark_dead_for_class() {
   local name="$1" class="$2" text="$3" reset
   case "$class" in
@@ -380,6 +396,18 @@ mark_dead_for_class() {
       ;;
     AUTH)
       mark_dead "$name" "$(( $(now) + 3600 ))" auth
+      ;;
+    SOFT)
+      # TEXT here is the epoch the account's own signal file said its
+      # five-hour window resets at, or `unknown`. The account's own number is
+      # preferred over the default for the same reason a LIMIT message's
+      # parsed reset is: it is the only statement about this window made by
+      # something that can see it. Anything not strictly in the future
+      # (missing, unknown, already past, non-numeric) falls back, so a bad
+      # signal shortens nothing.
+      reset="$text"
+      [ "$reset" -gt "$(now)" ] 2>/dev/null || reset=$(( $(now) + $(parse_duration "$SOFT_DEAD") ))
+      mark_dead "$name" "$reset" soft
       ;;
   esac
 }

@@ -68,6 +68,87 @@
 #                               appear before giving up on --resume (default:
 #                               30; accepted and validated but inert since
 #                               the D6 amendment above)
+#   D8. Proactive ("soft") handoff, added on top of the reactive one above.
+#       `--night` runs unmonitored, so an account nearly out of its five-hour
+#       window is a session that will stop mid-work with nobody there. The
+#       soft trigger hands the session on at a moment where handing it on is
+#       cheap instead of waiting for the limit to arrive.
+#
+#       It fires only on the CONJUNCTION of three independent facts, checked
+#       once per outer poll tick:
+#         (a) a compaction checkpoint was seen in the bytes appended since
+#             launch -- a literal substring match on "isCompactSummary":true,
+#             schema-agnostic for D3's reason. A sighting only ARMS a
+#             candidate; it NEVER kills on its own, because the bytes right
+#             after a checkpoint are the start of the next turn (the mid-turn
+#             orphan hazard of issues #2 and #12).
+#         (b) usage_fraction(current account) is numeric and strictly greater
+#             than BATON_SOFT_SWITCH_FRACTION.
+#         (c) no watched transcript has grown for BATON_QUIET_SECS.
+#       Deliberately NOT part of classify_text: D2's partition is over
+#       TROUBLE classes and is total, and a compaction checkpoint is not
+#       trouble. A fourth class there would change what UNKNOWN means for
+#       every existing caller.
+#
+#       The usage signal is a NEW file, not the CLI's own state: the harness
+#       statusline writes <CLAUDE_CONFIG_DIR>/.rate-limits.json on every
+#       render, holding its .rate_limits object plus a `written_at` epoch.
+#       watch.sh's standing rule (never open .claude.json or a credentials
+#       file) is unchanged, and lib/usage.sh is the only reader.
+#
+#       FAIL CLOSED. usage_fraction answers the single token `unknown` when
+#       the file is missing, unparseable, lacks five_hour.used_percentage,
+#       holds a non-numeric value, or carries a `written_at` more than
+#       BATON_USAGE_MAX_AGE seconds away from now IN EITHER DIRECTION -- and
+#       `unknown` NEVER arms the trigger. The freshness window is two-sided:
+#       a timestamp in the future is not fresh, it is unexplained (clock
+#       skew, a timezone bug, a hand-edited file), and reading it as fresh is
+#       the one wrong answer that arms the trigger. An old number about a
+#       five-hour window is not a small error either; it is a statement about
+#       a different window.
+#
+#       A soft handoff is a handoff in every other respect: it kills the
+#       child exactly as the LIMIT path does, closes the unit with a
+#       completion receipt, rotates through the same path with
+#       `--resume <id>`, and COUNTS against BATON_MAX_HANDOFFS (so the cap
+#       stop and its issue-#6 resume pointer, exit 75, are unchanged). The
+#       dead mark it writes carries the reason word `soft` rather than
+#       `limit`, dated from the signal's own five_hour.resets_at when that is
+#       in the future and from BATON_SOFT_DEAD otherwise -- a morning reader
+#       has to be able to tell "the server refused us" from "baton left while
+#       it still worked". Nothing new prints a runnable command: stderr gets
+#       a non-runnable notice and the durable line goes to the handoff log.
+#
+#       Knobs (validated once in night_knobs, before any child is launched):
+#         BATON_SOFT_SWITCH          1/0, turns the trigger off (default: 1)
+#         BATON_SOFT_SWITCH_FRACTION fraction of the 5h window above which a
+#                                    checkpoint may hand off (default: 0.80)
+#         BATON_QUIET_SECS           seconds of transcript silence required
+#                                    before the cut (default: 20)
+#         BATON_SOFT_DEAD            stand-down for a softly handed-off
+#                                    account when its signal named no reset
+#                                    (default: 5h)
+#         BATON_USAGE_MAX_AGE        seconds after which the signal file is
+#                                    stale, i.e. unknown (default: 600)
+#         BATON_NIGHT_CTX_ARM        1/0 (default: 1). In --night mode ONLY,
+#                                    export CLAUDE_CTX_ENFORCE=1,
+#                                    CLAUDE_CTX_PARK=95000,
+#                                    CLAUDE_CTX_CAP=100000 and
+#                                    CLAUDE_CTX_ORCHESTRATOR=1 to the child
+#                                    unless the operator already set
+#                                    CLAUDE_CTX_ENFORCE, and append
+#                                    `--autocompact 100k` unless the operator
+#                                    passed their own. Plain `baton` is
+#                                    untouched and stays a pure passthrough.
+#
+#       Premise on record (verifier B3, 2026-09-02): the premise is WEAKENED,
+#       not established. Compaction frequency is decoupled from the five-hour
+#       clock, reactive failover already loses nothing that would have
+#       succeeded, and no handoff log on this machine shows any such loss.
+#       The fact that would settle it is a handoff log from a real overnight
+#       run showing a reactive handoff that lost identifiable in-flight work.
+#       Until then BATON_SOFT_SWITCH=0 is the setting that costs nothing.
+#
 #
 # System surface driven by every scenario below: the `baton` executable
 # invoked as a real subprocess (argv in, stdout/stderr/exit-code out), a fake

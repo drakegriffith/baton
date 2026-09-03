@@ -34,6 +34,18 @@ rmdir "$LOCKDIR" 2>/dev/null
   printf '\n'
 } >> "$LOGFILE"
 
+# Per-invocation record of the CLAUDE_CTX_* environment this process was
+# handed, keyed by the same invocation number the argv log carries so a test
+# can join the two. Kept in its OWN file rather than added as a field to the
+# argv log line above, because a dozen existing scenarios grep that line's
+# exact shape: a new field there would be an edit to every one of them, and
+# this fixture's contract is that a new behavior is purely additive.
+{
+  printf 'inv=%s ctx=' "$n"
+  env | grep '^CLAUDE_CTX_' | sort | tr '\n' ',' || true
+  printf '\n'
+} >> "$CONFIG_DIR/.fake-env"
+
 echo "$$ $(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')" > "$CONFIG_DIR/.fake-pid-ppid"
 
 # Per-invocation behavior, read fresh every time (indexed bash arrays; bash

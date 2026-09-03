@@ -52,6 +52,68 @@ night_knobs() {
   is_unum "$NIGHT_INTERVAL" || die "bad BATON_WATCH_INTERVAL '$NIGHT_INTERVAL' (want seconds, e.g. 5)"
   is_unum "$NIGHT_WAIT_SECS" || die "bad BATON_SESSION_WAIT_SECS '$NIGHT_WAIT_SECS' (want seconds, e.g. 30)"
   is_uint "$NIGHT_MAX_HANDOFFS" || die "bad BATON_MAX_HANDOFFS '$NIGHT_MAX_HANDOFFS' (want a whole number, e.g. 3)"
+
+  # --- the soft (proactive) handoff knobs, D8 ------------------------------
+  # Validated HERE, in the same place and for the same reason as the three
+  # above: every one of them is read inside a poll loop or at a kill, and a
+  # bad value there fails past baton's error contract in the dark. The
+  # duration is validated by running parse_duration for its side effect (it
+  # dies on anything it cannot parse), so a typo in BATON_SOFT_DEAD is
+  # refused before a child is launched rather than at 4am when the mark is
+  # written.
+  NIGHT_SOFT_SWITCH="${BATON_SOFT_SWITCH:-1}"
+  NIGHT_SOFT_FRACTION="${BATON_SOFT_SWITCH_FRACTION:-0.80}"
+  NIGHT_QUIET_SECS="${BATON_QUIET_SECS:-20}"
+  NIGHT_SOFT_DEAD="${BATON_SOFT_DEAD:-5h}"
+  NIGHT_USAGE_MAX_AGE="${BATON_USAGE_MAX_AGE:-600}"
+  NIGHT_CTX_ARM="${BATON_NIGHT_CTX_ARM:-1}"
+  case "$NIGHT_SOFT_SWITCH" in 0|1) ;; *) die "bad BATON_SOFT_SWITCH '$NIGHT_SOFT_SWITCH' (want 1 or 0)" ;; esac
+  case "$NIGHT_CTX_ARM" in 0|1) ;; *) die "bad BATON_NIGHT_CTX_ARM '$NIGHT_CTX_ARM' (want 1 or 0)" ;; esac
+  is_unum "$NIGHT_SOFT_FRACTION" || die "bad BATON_SOFT_SWITCH_FRACTION '$NIGHT_SOFT_FRACTION' (want a fraction of the 5h window, e.g. 0.80)"
+  awk -v f="$NIGHT_SOFT_FRACTION" 'BEGIN{exit !(f >= 0 && f <= 1)}' \
+    || die "bad BATON_SOFT_SWITCH_FRACTION '$NIGHT_SOFT_FRACTION' (want a fraction between 0 and 1, e.g. 0.80)"
+  is_unum "$NIGHT_QUIET_SECS" || die "bad BATON_QUIET_SECS '$NIGHT_QUIET_SECS' (want seconds, e.g. 20)"
+  is_uint "$NIGHT_USAGE_MAX_AGE" || die "bad BATON_USAGE_MAX_AGE '$NIGHT_USAGE_MAX_AGE' (want seconds, e.g. 600)"
+  parse_duration "$NIGHT_SOFT_DEAD" >/dev/null
+}
+
+# --- the soft trigger (D8) ------------------------------------------------
+#
+# What it is: `--night` runs unmonitored, so an account that is nearly out of
+# its five-hour window is a session that will stop mid-work with nobody
+# there. The soft trigger hands the session on at a moment where handing it
+# on costs nothing -- straight after a compaction checkpoint, with the
+# transcript quiet -- rather than waiting for the limit to arrive.
+#
+# It is a CONJUNCTION of three independent facts, and every one of them is
+# load-bearing:
+#   1. a compaction checkpoint was seen in the appended bytes,
+#   2. the account's own usage signal says it is past the threshold,
+#   3. the transcript has been quiet for BATON_QUIET_SECS.
+# (1) alone would kill a session in the middle of the very turn that follows
+# a compaction, which is the mid-turn orphan hazard issues #2 and #12 are
+# about: the checkpoint is a good place to CUT, not a reason to. (2) alone
+# would fire at a moment with a half-written turn on the wire. (3) is what
+# makes the cut boring.
+#
+# soft_compaction_seen TEXT -- a literal substring test, deliberately not a
+# member of classify_text's partition (D2 keeps that a total partition of
+# TROUBLE classes; this is not trouble, and adding a fourth class would
+# change what every existing caller's UNKNOWN means). Literal rather than
+# JSON-parsed for D3's reason: the shape of the record is unverified, the
+# marker is not.
+soft_compaction_seen() {
+  case "$1" in *'"isCompactSummary":true'*) return 0 ;; esac
+  return 1
+}
+
+# soft_over_threshold FRACTION THRESHOLD -- true only when FRACTION is a
+# number strictly above THRESHOLD. `unknown` (every way of not knowing, see
+# lib/usage.sh) reaches here as a non-number and returns false, which is the
+# fail-closed rule in the one place that could break it.
+soft_over_threshold() {
+  is_unum "$1" || return 1
+  awk -v f="$1" -v t="$2" 'BEGIN{exit !(f > t)}'
 }
 
 # transcript_dir_for CONFIG_DIR -> that account's transcript dir for $PWD,
@@ -156,8 +218,10 @@ EOF
 # On return, sets:
 #   NIGHT_RESULT      ROTATE | EXITED
 #   NIGHT_EXIT_CODE   (EXITED only) the child's real exit code
-#   NIGHT_CLASS       (ROTATE only) LIMIT | AUTH
-#   NIGHT_TEXT        (ROTATE only) the raw text that produced NIGHT_CLASS
+#   NIGHT_CLASS       (ROTATE only) LIMIT | AUTH | SOFT
+#   NIGHT_TEXT        (ROTATE only) the raw text that produced NIGHT_CLASS,
+#                     or for SOFT the reset epoch its usage signal reported
+#   NIGHT_SOFT_PCT    (SOFT only) whole percent of the 5h window used
 #   NIGHT_SESSION_ID  (ROTATE only) the basename of the transcript file that
 #                     grew, i.e. the id of the session that was actually
 #                     running, or "" (means: use -c on the next launch, never
@@ -298,6 +362,16 @@ run_watched() {
 
   local interval="$NIGHT_INTERVAL"
   local cursors="" f size offset class line
+  # Soft-trigger state, owned by this loop and nothing else: whether a
+  # compaction checkpoint has been SIGHTED (armed, never acted on at the
+  # sighting -- see soft_compaction_seen), which transcript it was sighted
+  # in (that file's basename is the session the handoff resumes), and when
+  # any watched transcript last grew. `soft_armed_at` is recorded rather
+  # than a bare flag so a morning reader of the code can see that the
+  # quiet window is measured from the last WRITE, not from the checkpoint:
+  # a session that keeps working after compacting is not quiet.
+  local soft_armed_at="" soft_file="" last_growth soft_frac soft_pct soft_reset
+  last_growth=$(now)
 
   # Did the child actually START? `cmd &` hands back a pid whatever happens
   # next: if the exec fails -- binary missing, or present and not executable
@@ -381,7 +455,19 @@ run_watched() {
       [ -n "$offset" ] || offset=$(launch_size "$snap" "$f")
       size=$(wc -c < "$f" | tr -d ' ')
       if [ "$size" -gt "$offset" ]; then
+        # Growth on ANY watched transcript restarts the quiet window. The
+        # subject is "is this session between turns", and a session that is
+        # writing is not.
+        last_growth=$(now)
         while IFS= read -r line; do
+          # Arm-only, in its own statement before the trouble classes: the
+          # sighting records a candidate and a session id and does nothing
+          # else. Never a kill here (issues #2/#12: the bytes right after a
+          # compaction checkpoint are the start of the next turn).
+          if soft_compaction_seen "$line"; then
+            soft_armed_at=$(now)
+            soft_file="$f"
+          fi
           class=$(classify_text "$line")
           if [ "$class" = LIMIT ] || [ "$class" = AUTH ]; then
             kill -TERM "$pid" 2>/dev/null
@@ -407,6 +493,37 @@ run_watched() {
     done <<EOF
 $(touched_since "$ref" "$tdir")
 EOF
+
+    # --- the soft trigger, decided once per OUTER tick (D8) ---------------
+    #
+    # Once per tick rather than per line, because the third condition is
+    # about the absence of lines: a per-line decision can never observe
+    # quiet. The usage file is read only when the two cheap local conditions
+    # already hold, so a night that never compacts never opens it.
+    if [ "$NIGHT_SOFT_SWITCH" = 1 ] && [ -n "$soft_armed_at" ] && [ -n "$soft_file" ] \
+       && [ $(( $(now) - last_growth )) -ge "$NIGHT_QUIET_SECS" ]; then
+      soft_frac=$(usage_fraction "$name" "$NIGHT_USAGE_MAX_AGE")
+      if soft_over_threshold "$soft_frac" "$NIGHT_SOFT_FRACTION"; then
+        # The same ending as the LIMIT path, deliberately: a child baton
+        # decided to end is a child baton has to close a unit for, or the
+        # next --pickup offers to redo work baton itself stopped.
+        kill -TERM "$pid" 2>/dev/null
+        wait "$pid" 2>/dev/null
+        rm -f "$ref" "$snap"
+        runs_record_complete "$unit" "rotated-SOFT"
+        soft_pct=$(awk -v f="$soft_frac" 'BEGIN{printf "%d", f * 100 + 0.5}')
+        soft_reset=$(usage_reset_epoch "$name" "$NIGHT_USAGE_MAX_AGE")
+        NIGHT_RESULT=ROTATE
+        NIGHT_CLASS=SOFT
+        # TEXT is the reset epoch, not a message: for SOFT there is no line
+        # of text that caused anything, and mark_dead_for_class's third
+        # argument has always meant "the evidence this mark is dated from".
+        NIGHT_TEXT="$soft_reset"
+        NIGHT_SOFT_PCT="$soft_pct"
+        NIGHT_SESSION_ID=$(basename "$soft_file" .jsonl)
+        return 0
+      fi
+    fi
   done
 
   rm -f "$ref" "$snap"
@@ -449,6 +566,36 @@ night_mode() {
   local handoffs=0 resume_mode="" resume_hint="" acct prev max_handoffs
   night_knobs
   max_handoffs="$NIGHT_MAX_HANDOFFS"
+  # Declared before any run_watched call so the SOFT branch below can read it
+  # under set -u even on the paths that never set it.
+  NIGHT_SOFT_PCT=""
+
+  # --- the orchestrator context arm, --night only (D8) --------------------
+  #
+  # An unmonitored run is exactly the case where hitting the end of the
+  # context window is expensive: nobody is there to notice the session went
+  # sideways at 3am. So --night parks and compacts EARLY rather than at the
+  # last possible moment. It is scoped to this function, which is only ever
+  # reached through the --night arm, so plain `baton` stays the pure argv and
+  # env passthrough scenario 19 pins.
+  #
+  # Both halves defer to a decision the operator already made: an exported
+  # CLAUDE_CTX_ENFORCE means they are driving the context policy themselves,
+  # and an --autocompact of their own means they have picked a threshold.
+  # baton adds a default, it does not overrule a choice.
+  if [ "$NIGHT_CTX_ARM" = 1 ]; then
+    if [ -z "${CLAUDE_CTX_ENFORCE:-}" ]; then
+      export CLAUDE_CTX_ENFORCE=1
+      export CLAUDE_CTX_PARK=95000
+      export CLAUDE_CTX_CAP=100000
+      export CLAUDE_CTX_ORCHESTRATOR=1
+    fi
+    local ctx_arg ctx_has_autocompact=0
+    for ctx_arg in ${@+"$@"}; do
+      case "$ctx_arg" in --autocompact|--autocompact=*) ctx_has_autocompact=1 ;; esac
+    done
+    [ "$ctx_has_autocompact" -eq 0 ] && set -- ${@+"$@"} --autocompact 100k
+  fi
 
   pick_live probe || die_no_live_account "" ""
   acct="$PICKED"
@@ -487,7 +634,16 @@ night_mode() {
         prev="$acct"
         acct="$PICKED"
         handoffs=$((handoffs + 1))
-        warn "handoff: account '$prev' is unavailable ($NIGHT_CLASS); switching to account '$acct'"
+        # SOFT is not "unavailable" and must never say so: the operator
+        # reading this line in the morning has to be able to tell a server
+        # that refused baton from a switch baton chose to make while the
+        # account still worked. Both notices stay non-runnable (issue #2);
+        # the line carrying a session id is the log's, below.
+        if [ "$NIGHT_CLASS" = SOFT ]; then
+          warn "handoff: account '$prev' is at ${NIGHT_SOFT_PCT}% of its 5h window after a compaction checkpoint; switching to account '$acct' -- details in $HANDOFF_LOG"
+        else
+          warn "handoff: account '$prev' is unavailable ($NIGHT_CLASS); switching to account '$acct'"
+        fi
         # One branch decides BOTH what run_watched is told to do and what the
         # log says it will do, so the two cannot disagree. They used to be
         # written twice: this if/else for resume_mode, and a separate
@@ -518,7 +674,16 @@ night_mode() {
         # so it is precisely the case that can be refused. The loop's next
         # iteration calls run_watched, and run_watched appends LAUNCHED only
         # if the resume actually happened.
-        handoff_log "ATTEMPT: handoff -- '$prev' unavailable ($NIGHT_CLASS); will resume under '$acct' with $resume_hint"
+        if [ "$NIGHT_CLASS" = SOFT ]; then
+          # The soft handoff's own morning line. It states the CAUSE in the
+          # terms the decision was actually made in -- the percentage, the
+          # checkpoint, the quiet window -- because "unavailable" would be
+          # false and because these three numbers are the whole argument for
+          # having left a working account.
+          handoff_log "ATTEMPT: proactive handoff (soft) -- account '$prev' at ${NIGHT_SOFT_PCT}% of its 5h window after a compaction checkpoint (quiet ${NIGHT_QUIET_SECS}s); will resume session $NIGHT_SESSION_ID under '$acct'"
+        else
+          handoff_log "ATTEMPT: handoff -- '$prev' unavailable ($NIGHT_CLASS); will resume under '$acct' with $resume_hint"
+        fi
         ;;
     esac
   done

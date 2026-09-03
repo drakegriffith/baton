@@ -253,6 +253,11 @@ case "${1:-}" in
     # launcher runs. lock -> runs is the only edge between the two.
     . "$SCRIPT_DIR/lib/runs.sh"
     . "$SCRIPT_DIR/lib/lock.sh"
+    # usage.sh before watch.sh: the watcher's soft trigger (D8) asks it how
+    # much of the five-hour window is gone. Sourced ONLY here, for the same
+    # reason watch.sh is -- no existing flag may grow a dependency on it, and
+    # the reader must not exist in a process that could not have a child.
+    . "$SCRIPT_DIR/lib/usage.sh"
     . "$SCRIPT_DIR/lib/watch.sh"
     night_mode "$@" ;;
   --pickup)
