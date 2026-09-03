@@ -7,9 +7,15 @@
 # and only all three together may. A build that switches on the compaction
 # sighting alone passes a one-run version of this test and burns an account
 # every time a long session compacts.
+#
+# The three-fact conjunction is no longer the default: it is what
+# BATON_SOFT_NEED_COMPACT=1 asks for, so this whole scenario runs under that
+# knob and stays the pin on the legacy shape. The default two-fact trigger
+# has its own scenario (49).
 set -u
 . "$FIXTURES_DIR/lib.sh"
 scenario_begin "46-proactive-soft-handoff"
+export BATON_SOFT_NEED_COMPACT=1
 
 COMPACT_LINE='{"type":"user","isCompactSummary":true,"message":{"content":"This session is being continued from a previous conversation..."}}'
 
@@ -209,4 +215,5 @@ scenario_check "5: b resumed a's session once it was quiet"   $(grep -q -- "--re
 cleanup_root
 
 unset BATON_QUIET_SECS
+unset BATON_SOFT_NEED_COMPACT
 scenario_end
