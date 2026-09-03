@@ -63,10 +63,13 @@ scenario_check "2: the night launch's env was recorded (subject exists)" \
   $([ -n "$night_ctx" ]; echo $?)
 scenario_check "2: CLAUDE_CTX_ENFORCE=1" \
   $(printf '%s' "$night_ctx" | grep -q 'CLAUDE_CTX_ENFORCE=1'; echo $?)
-scenario_check "2: CLAUDE_CTX_PARK=95000" \
-  $(printf '%s' "$night_ctx" | grep -q 'CLAUDE_CTX_PARK=95000'; echo $?)
-scenario_check "2: CLAUDE_CTX_CAP=100000" \
-  $(printf '%s' "$night_ctx" | grep -q 'CLAUDE_CTX_CAP=100000'; echo $?)
+# 80k park < 87k autocompact (the CLI subtracts a 13,000-token summary
+# buffer from the stated 100k window, Claude Code 2.1.259) < 95k cap. The
+# ordering is the claim; the numbers are how it is falsifiable.
+scenario_check "2: CLAUDE_CTX_PARK=80000" \
+  $(printf '%s' "$night_ctx" | grep -q 'CLAUDE_CTX_PARK=80000'; echo $?)
+scenario_check "2: CLAUDE_CTX_CAP=95000" \
+  $(printf '%s' "$night_ctx" | grep -q 'CLAUDE_CTX_CAP=95000'; echo $?)
 scenario_check "2: CLAUDE_CTX_ORCHESTRATOR=1" \
   $(printf '%s' "$night_ctx" | grep -q 'CLAUDE_CTX_ORCHESTRATOR=1'; echo $?)
 scenario_check "2: the child argv carries --autocompact 100k" \

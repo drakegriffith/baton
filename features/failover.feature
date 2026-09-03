@@ -74,8 +74,9 @@
 #       soft trigger hands the session on at a moment where handing it on is
 #       cheap instead of waiting for the limit to arrive.
 #
-#       It fires only on the CONJUNCTION of three independent facts, checked
-#       once per outer poll tick:
+#       By DEFAULT it fires on the conjunction of (b) AND (c) below, checked
+#       once per outer poll tick. (a) is a third fact the operator can ask
+#       for with BATON_SOFT_NEED_COMPACT=1; it is not required by default.
 #         (a) a compaction checkpoint was seen in the bytes appended since
 #             launch -- a literal substring match on "isCompactSummary":true,
 #             schema-agnostic for D3's reason. A sighting only ARMS a
@@ -85,6 +86,28 @@
 #         (b) usage_fraction(current account) is numeric and strictly greater
 #             than BATON_SOFT_SWITCH_FRACTION.
 #         (c) no watched transcript has grown for BATON_QUIET_SECS.
+#
+#       Why (a) is not a default: it never guarded the cut. The sighting only
+#       arms; (c) is what gates the kill, and (c) is unchanged. Requiring (a)
+#       did not make the cut safer, it made it rarer -- an account at 95% of
+#       its window that had not compacted recently rode the window to the
+#       limit, the exact outcome D8 exists to avoid.
+#
+#       What dropping it costs, on the record: the trigger fires more often,
+#       so it fires more often through the hole (c) does not close. "Quiet"
+#       means "no transcript bytes for BATON_QUIET_SECS", and a session can
+#       be quiet and mid-work -- a long tool call, a long model stream, a
+#       subagent thinking -- for longer than that. Those states were always
+#       reachable; they are reached more often now. BATON_QUIET_SECS=120 on
+#       the launch line narrows the hole; it does not close it, and it says
+#       nothing about how stale the usage signal may be (that is
+#       BATON_USAGE_MAX_AGE, still 600s, a separate window on a separate
+#       fact). The second cost is that the handoff now lands at an arbitrary
+#       context height rather than just after a compaction, so a resumed
+#       session can come up near its cap and hit it on the first tool call.
+#       That is survivable only because the orchestrator's context-budget
+#       text tells a session at the cap to continue into autocompact rather
+#       than stop and wait.
 #       Deliberately NOT part of classify_text: D2's partition is over
 #       TROUBLE classes and is total, and a compaction checkpoint is not
 #       trouble. A fourth class there would change what UNKNOWN means for
@@ -121,8 +144,11 @@
 #
 #       Knobs (validated once in night_knobs, before any child is launched):
 #         BATON_SOFT_SWITCH          1/0, turns the trigger off (default: 1)
-#         BATON_SOFT_SWITCH_FRACTION fraction of the 5h window above which a
-#                                    checkpoint may hand off (default: 0.80)
+#         BATON_SOFT_NEED_COMPACT    1/0 (default: 0). At 1, fact (a) above
+#                                    is required again and the trigger is the
+#                                    original three-fact conjunction.
+#         BATON_SOFT_SWITCH_FRACTION fraction of the 5h window above which
+#                                    the trigger may hand off (default: 0.80)
 #         BATON_QUIET_SECS           seconds of transcript silence required
 #                                    before the cut (default: 20)
 #         BATON_SOFT_DEAD            stand-down for a softly handed-off
@@ -132,14 +158,21 @@
 #                                    stale, i.e. unknown (default: 600)
 #         BATON_NIGHT_CTX_ARM        1/0 (default: 1). In --night mode ONLY,
 #                                    export CLAUDE_CTX_ENFORCE=1,
-#                                    CLAUDE_CTX_PARK=95000,
-#                                    CLAUDE_CTX_CAP=100000 and
+#                                    CLAUDE_CTX_PARK=80000,
+#                                    CLAUDE_CTX_CAP=95000 and
 #                                    CLAUDE_CTX_ORCHESTRATOR=1 to the child
 #                                    unless the operator already set
 #                                    CLAUDE_CTX_ENFORCE, and append
 #                                    `--autocompact 100k` unless the operator
-#                                    passed their own. Plain `baton` is
-#                                    untouched and stays a pure passthrough.
+#                                    passed their own. The three numbers are
+#                                    one ordering: 80k park (write the
+#                                    manifest) < 87k, where --autocompact
+#                                    100k actually triggers (the CLI
+#                                    subtracts a 13,000-token summary buffer
+#                                    from the stated window, Claude Code
+#                                    2.1.259) < 95k cap backstop. Plain
+#                                    `baton` is untouched and stays a pure
+#                                    passthrough.
 #
 #       Premise on record (verifier B3, 2026-09-02): the premise is WEAKENED,
 #       not established. Compaction frequency is decoupled from the five-hour
