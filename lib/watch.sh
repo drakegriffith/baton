@@ -141,6 +141,30 @@ soft_over_threshold() {
   awk -v f="$1" -v t="$2" 'BEGIN{exit !(f > t)}'
 }
 
+# soft_still_quiet FILE SIZE MTIME -- true only when FILE is still exactly
+# the bytes and the modification time the poll scan saw.
+#
+# Why it exists: quiet detection and the kill are check-then-act. The scan
+# reads sizes, the trigger then reads the usage file, and only after that
+# does the TERM go out. A child that appends anywhere in that gap is killed
+# mid-write, which is the mid-turn orphan hazard of issues #2 and #12 coming
+# back through the side door -- and dropping the compaction conjunct widened
+# the exposure by making the trigger fire more often. So the last thing
+# checked before the kill is the same fact the decision was made on.
+#
+# Both size AND mtime, not size alone: a rewrite that lands on the same byte
+# count is still a write, and the session id is derived from this file.
+# Missing, unreadable, or an empty path all answer false -- the fail-closed
+# direction, since "I cannot tell" must never authorise a kill.
+soft_still_quiet() {
+  local f="$1" want_size="$2" want_mtime="$3" now_size now_mtime
+  [ -n "$f" ] && [ -f "$f" ] || return 1
+  now_size=$(wc -c < "$f" 2>/dev/null | tr -d ' ')
+  now_mtime=$(stat -f %m "$f" 2>/dev/null)
+  [ -n "$now_size" ] && [ -n "$now_mtime" ] || return 1
+  [ "$now_size" = "$want_size" ] && [ "$now_mtime" = "$want_mtime" ]
+}
+
 # transcript_dir_for CONFIG_DIR -> that account's transcript dir for $PWD,
 # using the exact slug rule DOC.md gives the real CLI (absolute cwd, `/` and
 # `.` replaced by `-`).
@@ -396,7 +420,7 @@ run_watched() {
   # quiet window is measured from the last WRITE, not from the checkpoint:
   # a session that keeps working after compacting is not quiet.
   local soft_armed_at="" soft_file="" last_growth_file="" last_growth
-  local soft_frac soft_pct soft_reset
+  local soft_frac soft_pct soft_reset soft_pick soft_guard_size soft_guard_mtime
   last_growth=$(now)
 
   # Did the child actually START? `cmd &` hands back a pid whatever happens
@@ -531,11 +555,43 @@ EOF
     # about the absence of lines: a per-line decision can never observe
     # quiet. The usage file is read only after the cheap local conditions
     # already hold, so a busy night never opens it.
+    # `last_growth_file` non-empty is a REQUIREMENT, not a detail. It starts
+    # at launch alongside last_growth, so without it "no transcript has been
+    # written at all" reads as "the transcript has been quiet" -- and a child
+    # still in startup, in a long first tool call, or waiting on a subagent
+    # got killed and resumed with a bare `-c` and no session id. Absence of a
+    # transcript is absence of evidence, not evidence of a turn boundary.
     if [ "$NIGHT_SOFT_SWITCH" = 1 ] \
+       && [ -n "$last_growth_file" ] \
        && { [ "$NIGHT_SOFT_NEED_COMPACT" = 0 ] || { [ -n "$soft_armed_at" ] && [ -n "$soft_file" ]; }; } \
        && [ $(( $(now) - last_growth )) -ge "$NIGHT_QUIET_SECS" ]; then
+      # Which transcript the handoff would resume, decided BEFORE the kill so
+      # the guard below and the session id are about the same file.
+      #
+      # Default: the file that last GREW, because the file that is being
+      # written to is the session that is running. `soft_file` (the file a
+      # checkpoint was sighted in) is used only when the operator asked for
+      # the checkpoint conjunct, and there it is the point of the mode. A
+      # checkpoint sighting must NOT win by default: a session that rolls to
+      # a new transcript mid-run leaves an older marked file behind, and
+      # resuming that one abandons the live session.
+      if [ "$NIGHT_SOFT_NEED_COMPACT" = 1 ]; then
+        soft_pick="$soft_file"
+      else
+        soft_pick="$last_growth_file"
+      fi
+      # The size the scan recorded for that file, and its mtime now: the pair
+      # soft_still_quiet re-checks in the last statement before the TERM.
+      soft_guard_size=$(cursor_of "$cursors" "$soft_pick")
+      [ -n "$soft_guard_size" ] || soft_guard_size=$(wc -c < "$soft_pick" 2>/dev/null | tr -d ' ')
+      soft_guard_mtime=$(stat -f %m "$soft_pick" 2>/dev/null)
       soft_frac=$(usage_fraction "$name" "$NIGHT_USAGE_MAX_AGE")
-      if soft_over_threshold "$soft_frac" "$NIGHT_SOFT_FRACTION"; then
+      # The guard is the LAST condition on purpose: everything after it is
+      # the kill. If the transcript moved while the usage file was being
+      # read, this tick is abandoned and the next scan will see the growth
+      # and restart the quiet window.
+      if soft_over_threshold "$soft_frac" "$NIGHT_SOFT_FRACTION" \
+         && soft_still_quiet "$soft_pick" "$soft_guard_size" "$soft_guard_mtime"; then
         # The same ending as the LIMIT path, deliberately: a child baton
         # decided to end is a child baton has to close a unit for, or the
         # next --pickup offers to redo work baton itself stopped.
@@ -552,15 +608,20 @@ EOF
         # argument has always meant "the evidence this mark is dated from".
         NIGHT_TEXT="$soft_reset"
         NIGHT_SOFT_PCT="$soft_pct"
-        # Whether a checkpoint was actually SIGHTED -- independent of whether
-        # one was required -- because that is what the morning wording has to
-        # be true about.
-        NIGHT_SOFT_COMPACT_SEEN="${soft_armed_at:+1}"
-        # The checkpoint's file when there was one, otherwise the file that
-        # last grew. Both can be empty (a run where no transcript was ever
-        # seen), and an empty NIGHT_SESSION_ID falls through to night_mode's
-        # existing `-c` branch rather than inventing an id.
-        NIGHT_SESSION_ID=$(basename "${soft_file:-$last_growth_file}" .jsonl)
+        # Whether a checkpoint was sighted IN THE FILE BEING RESUMED --
+        # independent of whether one was required -- because that is what the
+        # morning wording has to be true about. A checkpoint in some other,
+        # abandoned transcript does not license the sentence "after a
+        # compaction checkpoint" about this session.
+        NIGHT_SOFT_COMPACT_SEEN=""
+        if [ -n "$soft_armed_at" ] && [ "$soft_file" = "$soft_pick" ]; then
+          NIGHT_SOFT_COMPACT_SEEN=1
+        fi
+        # The same file the guard just re-validated. It cannot be empty:
+        # the trigger requires an observed transcript, so the SOFT path never
+        # reaches night_mode's `-c` fallback -- that branch is now only for
+        # the reactive classes.
+        NIGHT_SESSION_ID=$(basename "$soft_pick" .jsonl)
         return 0
       fi
     fi

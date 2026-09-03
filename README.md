@@ -96,21 +96,42 @@ baton --locks           # every lock subject on disk, with state and holder
 Two things, both scoped to `--night` and both off with
 `BATON_NIGHT_CTX_ARM=0`. Plain `baton` stays a pure argv and env passthrough.
 
-1. It exports `CLAUDE_CTX_ENFORCE=1`, `CLAUDE_CTX_PARK=95000`,
-   `CLAUDE_CTX_CAP=100000` and `CLAUDE_CTX_ORCHESTRATOR=1` to the child, so
+1. It exports `CLAUDE_CTX_ENFORCE=1`, `CLAUDE_CTX_PARK=80000`,
+   `CLAUDE_CTX_CAP=95000` and `CLAUDE_CTX_ORCHESTRATOR=1` to the child, so
    an unmonitored session parks well before the context window ends rather
    than at the last possible moment. If you have already exported
    `CLAUDE_CTX_ENFORCE` yourself, baton sets none of them.
 2. It appends `--autocompact 100k` to the child's arguments, unless you
    passed an `--autocompact` of your own.
 
+The three numbers are one ordering, not three settings: 80k park (the child
+writes its handoff manifest while it still has room) < 87k, where
+`--autocompact 100k` actually triggers foreground compaction (the CLI
+subtracts a 13,000-token summary buffer from the window you name; Claude Code
+2.1.259) < 95k cap backstop, which only matters if compaction did not happen.
+
 `--night` can also hand the session on BEFORE an account is refused: if the
-transcript shows a compaction checkpoint, the account is past
-`BATON_SOFT_SWITCH_FRACTION` of its five-hour window, and nothing has been
-written for `BATON_QUIET_SECS`, baton cuts there and resumes under the next
-account. The dead mark reads `soft` rather than `limit`, and the handoff log
-says why. This is proactive, so it is the one baton behavior that can leave
-an account that still works: `BATON_SOFT_SWITCH=0` turns it off.
+account is past `BATON_SOFT_SWITCH_FRACTION` of its five-hour window and a
+transcript baton has actually watched grow has been silent for
+`BATON_QUIET_SECS`, baton cuts there and resumes that transcript's session
+under the next account. The dead mark reads `soft` rather than `limit`, and
+the handoff log says why. This is proactive, so it is the one baton behavior
+that can leave an account that still works: `BATON_SOFT_SWITCH=0` turns it
+off.
+
+A compaction checkpoint is NOT required. It used to be, and it never guarded
+anything: a sighting only ever armed a candidate, and the quiet window is
+what gates the cut. Requiring it just made the handoff rarer, so an account
+at 95% that had not compacted lately rode the window to the limit.
+`BATON_SOFT_NEED_COMPACT=1` puts the requirement back.
+
+What the quiet window does not cover, worth knowing before you leave it
+running: "quiet" means no transcript bytes, and a session can be quiet and
+mid-work -- a long tool call, a long model stream, a subagent thinking.
+Raising `BATON_QUIET_SECS` (120 is a reasonable night value) narrows that
+window; it does not close it, and it says nothing about how stale the usage
+number itself may be. That is `BATON_USAGE_MAX_AGE`, a separate window on a
+separate fact.
 
 The usage number comes from `<account dir>/.rate-limits.json`, written by the
 harness statusline. If that file is missing, unreadable, or older than
@@ -184,11 +205,12 @@ Give a bigger plan more launches: `echo 3 > ~/.claude-accounts/big/.weight`.
 | `BATON_MAX_HANDOFFS` | `3` | account switches per run before giving up |
 | `BATON_SESSION_WAIT_SECS` | `30` | accepted and validated, but inert: the watcher now spots the running session by which transcript file grows, so it never waits for one to appear |
 | `BATON_SOFT_SWITCH` | `1` | `0` turns the proactive (soft) handoff off entirely |
-| `BATON_SOFT_SWITCH_FRACTION` | `0.80` | fraction of the 5h window above which a compaction checkpoint may hand off |
+| `BATON_SOFT_SWITCH_FRACTION` | `0.80` | fraction of the 5h window above which a quiet session may hand off |
+| `BATON_SOFT_NEED_COMPACT` | `0` | `1` also requires a compaction checkpoint to have been sighted before a soft handoff, the pre-2026-09-03 behavior |
 | `BATON_QUIET_SECS` | `20` | seconds of transcript silence required before a soft handoff cuts |
 | `BATON_SOFT_DEAD` | `5h` | stand-down for a softly handed-off account when its signal named no reset |
 | `BATON_USAGE_MAX_AGE` | `600` | seconds after which `.rate-limits.json` is stale, i.e. usage is unknown and nothing fires |
-| `BATON_NIGHT_CTX_ARM` | `1` | `0` stops `--night` exporting the `CLAUDE_CTX_*` vars and appending `--autocompact 100k` |
+| `BATON_NIGHT_CTX_ARM` | `1` | `0` stops `--night` exporting the `CLAUDE_CTX_*` vars (park 80k, cap 95k) and appending `--autocompact 100k` |
 
 ## Only one writer per subject (`--locks`, `--lock-status`, `--claim`, `--redispatch`)
 

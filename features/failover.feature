@@ -85,7 +85,20 @@
 #             orphan hazard of issues #2 and #12).
 #         (b) usage_fraction(current account) is numeric and strictly greater
 #             than BATON_SOFT_SWITCH_FRACTION.
-#         (c) no watched transcript has grown for BATON_QUIET_SECS.
+#         (c) no watched transcript has grown for BATON_QUIET_SECS -- and
+#             at least one transcript HAS been watched to grow. Absence of a
+#             transcript is absence of evidence, not a turn boundary: a child
+#             still starting up, in a long first tool call, or waiting on a
+#             subagent has written nothing, and killing it there resumes with
+#             no session id at all.
+#       The session resumed is the transcript that last GREW, not whichever
+#       file a checkpoint was once sighted in -- a session that rolls to a new
+#       transcript mid-run leaves an older marked file behind, and resuming
+#       that one abandons the live session. Under BATON_SOFT_NEED_COMPACT=1
+#       the checkpoint's file is the session, which is the point of that mode.
+#       Quiet detection and the kill are check-then-act, so the selected
+#       transcript's size AND mtime are re-validated in the last statement
+#       before the TERM and the tick is abandoned if either moved.
 #
 #       Why (a) is not a default: it never guarded the cut. The sighting only
 #       arms; (c) is what gates the kill, and (c) is unchanged. Requiring (a)

@@ -32,6 +32,7 @@ write_usage() {
 EOF
 }
 
+COMPACT_LINE='{"type":"user","isCompactSummary":true,"message":{"content":"This session is being continued from a previous conversation..."}}'
 ORDINARY_LINE='{"type":"assistant","message":{"content":"still working on the refactor, no checkpoint here"}}'
 
 # --- 1. default: 85% + quiet, and NOT ONE compaction marker ---------------
@@ -144,6 +145,127 @@ scenario_check "3: no raw shell error leaked" \
   $(! printf '%s' "$out" | grep -qE "integer expression|invalid time interval|line [0-9]+:"; echo $?)
 scenario_check "3: no child was launched at all" \
   $([ "$(invocation_count a)" -eq 0 ]; echo $?)
+cleanup_root
+
+# --- 4. no transcript ever observed is not a turn boundary ----------------
+# Codex B1 / Kimi F3. `last_growth` is initialised at launch, so with the
+# compaction conjunct off, high fresh usage plus one quiet window used to
+# fire on a child that had not written a single byte yet -- startup, a long
+# first tool call, a subagent -- and the handoff then resumed with a bare
+# `-c` and no session id. Absence of a transcript is absence of evidence.
+fresh_root
+export BATON_QUIET_SECS=1
+write_behavior a <<'EOF'
+STEP_BLOCK=(1)
+STEP_BLOCK_EXIT=(143)
+EOF
+write_usage a 85
+start_night
+# Several quiet windows. A build without the guard has fired by now.
+sleep 3
+tdir="$(config_dir_of a)/projects/$(cwd_slug)"
+n_transcripts=$(ls "$tdir"/*.jsonl 2>/dev/null | grep -c .)
+scenario_check "4: the fixture really wrote no transcript (got ${n_transcripts:-0})" \
+  $([ "${n_transcripts:-0}" -eq 0 ]; echo $?)
+scenario_check "4: a was not marked dead with no transcript ever seen" \
+  $(! is_dead_marked a; echo $?)
+scenario_check "4: b was never launched with no transcript ever seen" \
+  $([ "$(invocation_count b)" -eq 0 ]; echo $?)
+scenario_check "4: a's child was not killed with no transcript ever seen" \
+  $([ ! -s "$(signals_log_of a)" ]; echo $?)
+stop_night
+kill_fake_claude a
+cleanup_root
+
+# --- 5. the session resumed is the transcript that GREW -------------------
+# Codex B2 / Kimi F1. A checkpoint sighting used to win the session id
+# permanently, even with the knob at 0: an older transcript carrying a
+# compaction marker beat the transcript the session is actually writing to.
+# A 2.1.259 session that rolls to a new transcript file mid-run (after
+# /clear, for one) makes that the common path, not a corner case.
+fresh_root
+# 3s, not 1s: the two staged writes below have to land inside one quiet
+# window, or the handoff fires before the second transcript exists.
+export BATON_QUIET_SECS=3
+write_behavior a <<'EOF'
+STEP_TRANSCRIPT=("sess-old")
+STEP_BLOCK=(1)
+STEP_BLOCK_EXIT=(143)
+EOF
+write_behavior b <<'EOF'
+STEP_EXIT=(5)
+STEP_STDOUT=("resumed the current transcript")
+EOF
+write_usage a 85
+start_night
+old=$(wait_for_transcript a 5)
+scenario_check "5: a's first transcript appeared" $([ -n "$old" ]; echo $?)
+tdir="$(config_dir_of a)/projects/$(cwd_slug)"
+current="$tdir/sess-current.jsonl"
+# The OLD transcript is the one carrying the checkpoint...
+[ -n "$old" ] && printf '%s\n' "$COMPACT_LINE" >> "$old"
+sleep 1
+# ...and the CURRENT one is the session that is running.
+printf '%s\n' "$ORDINARY_LINE" >> "$current"
+sleep 1
+n_files=$(ls "$tdir"/*.jsonl 2>/dev/null | grep -c .)
+scenario_check "5: both transcripts exist in a's project dir (got ${n_files:-0})" \
+  $([ "${n_files:-0}" -eq 2 ]; echo $?)
+wait_for_night_exit 25
+scenario_check "5: the night run finished" $?
+log="$(fake_log)"
+scenario_check "5: b resumed the transcript that grew last" \
+  $(grep -q -- "--resume sess-current" "$log"; echo $?)
+scenario_check "5: b did NOT resume the older checkpoint transcript" \
+  $(! grep -q -- "--resume sess-old" "$log"; echo $?)
+handoff_log_path="$BATON_ACCOUNTS_ROOT/.handoff.log"
+scenario_check "5: the handoff log names the current session" \
+  $(grep -q "will resume session sess-current under 'b'" "$handoff_log_path"; echo $?)
+cleanup_root
+
+# --- 6. the quiet check is re-validated immediately before the kill -------
+# Codex B3. Quiet detection and the TERM are check-then-act: a child can
+# append after touched_since returns and before the kill, so the cut lands
+# mid-write. The window is a few microseconds of in-process shell between
+# two statements, and the fixture cannot reliably schedule an append inside
+# it, so the guard is pinned DIRECTLY -- soft_still_quiet as a unit, plus an
+# assertion that the trigger calls it -- rather than by a flaky race test.
+# Said plainly: this phase proves the guard is correct and is called, not
+# that the race is closed. Transcript silence still cannot tell idle from a
+# long tool call; only a real turn-complete signal could.
+fresh_root
+probe_dir="$SCRATCH/guard"
+mkdir -p "$probe_dir"
+watch_lib="$(dirname "$BATON_BIN")/lib/watch.sh"
+guard_probe() { # FILE SIZE MTIME -> the exit status soft_still_quiet gives
+  ( . "$watch_lib" >/dev/null 2>&1
+    soft_still_quiet "$1" "$2" "$3"; echo $? )
+}
+pf="$probe_dir/probe.jsonl"
+printf 'aaaa\n' > "$pf"
+psize=$(wc -c < "$pf" | tr -d ' ')
+pmtime=$(stat -f %m "$pf")
+scenario_check "6: an untouched transcript is still quiet" \
+  $([ "$(guard_probe "$pf" "$psize" "$pmtime")" -eq 0 ]; echo $?)
+printf 'bbbb\n' >> "$pf"
+scenario_check "6: a transcript that grew is NOT still quiet" \
+  $([ "$(guard_probe "$pf" "$psize" "$pmtime")" -ne 0 ]; echo $?)
+# Same size, newer mtime: a rewrite is a write, and size alone would miss it.
+pf2="$probe_dir/probe2.jsonl"
+printf 'aaaa\n' > "$pf2"
+p2size=$(wc -c < "$pf2" | tr -d ' ')
+p2mtime=$(stat -f %m "$pf2")
+sleep 1
+printf 'cccc\n' > "$pf2"
+scenario_check "6: a same-size rewrite is NOT still quiet" \
+  $([ "$(guard_probe "$pf2" "$p2size" "$p2mtime")" -ne 0 ]; echo $?)
+scenario_check "6: a vanished transcript is NOT still quiet" \
+  $([ "$(guard_probe "$probe_dir/gone.jsonl" 5 1)" -ne 0 ]; echo $?)
+scenario_check "6: an empty path is NOT still quiet" \
+  $([ "$(guard_probe "" 5 1)" -ne 0 ]; echo $?)
+# The call site. A guard nothing calls is a guard that inspected nothing.
+scenario_check "6: the soft trigger actually calls the guard" \
+  $(grep -q 'soft_still_quiet "\$soft_pick"' "$watch_lib"; echo $?)
 cleanup_root
 
 unset BATON_QUIET_SECS
