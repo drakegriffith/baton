@@ -21,6 +21,90 @@
 # JSONL files under <config-dir>/projects/<slug>/. It never opens
 # .claude.json, a credentials file, or anything else under an account dir.
 
+# Where the wave-wake observer lives and what its argv is answered by
+# lib/observe.sh, not by this file: `baton --observe` runs the same command in
+# the foreground from a terminal that never entered night mode, and it must
+# not have to source watch.sh (which can start a child) to know what to run.
+#
+# Located from THIS file rather than from baton's $SCRIPT_DIR, because
+# watch.sh is also sourced bare by tests that pin one of its pure helpers
+# (scenario 49's soft_still_quiet probe) in a shell where $SCRIPT_DIR does not
+# exist -- under `set -u` that read is fatal, and a sibling file's path is
+# knowable without it.
+. "$(dirname "${BASH_SOURCE[0]}")/observe.sh"
+
+# --- the observer supervisor, --night only ---------------------------------
+#
+# A night lane that was dispatched with PATHWAY_PICKUP set belongs to a
+# wave-wake run, and that run wants an observer watching it. The supervisor
+# elects itself through its own flock inside the run dir, so starting one per
+# lane is correct and baton takes NO lock: only one becomes active.
+#
+# night_observer_start -- called from night_mode once, before the first
+# account is picked. A missing observer NEVER blocks a lane: an absent target
+# leaves one witness line in the durable record and the launch continues,
+# because a lane that refuses to run because its watcher is missing has
+# turned an observability gap into an outage.
+night_observer_start() {
+  NIGHT_OBSERVER_PID=""
+  [ -n "${PATHWAY_PICKUP:-}" ] || return 0
+  local run_dir target
+  run_dir=$(dirname "$PATHWAY_PICKUP")
+  target=$(observe_target)
+  if [ ! -f "$target" ]; then
+    warn "wave-wake observer not started: no such target $target"
+    handoff_log "OBSERVER: target absent $target"
+    return 0
+  fi
+  observe_argv "$run_dir"
+  # Backgrounded WITHOUT a wrapping subshell, so $! is the supervisor's own
+  # pid and the TERM below reaches it rather than a shell that would leave it
+  # orphaned. Its streams go to the run dir, never to this terminal: the night
+  # lane's stdout belongs to the claude child (issue #2).
+  "${OBSERVE_ARGV[@]}" >>"$run_dir/observer.log" 2>&1 &
+  NIGHT_OBSERVER_PID=$!
+  handoff_log "OBSERVER: started pid=$NIGHT_OBSERVER_PID run_dir=$run_dir"
+  # The reap, on every way out of this process: a natural child exit, the
+  # cap stop, exhaustion, or a signal. watch.sh and baton install no other
+  # EXIT trap (checked, not assumed), so nothing is being overwritten here,
+  # and the trap is installed only once a pid exists so it can never fire
+  # empty. It kills the OBSERVER pid and nothing else -- never the claude
+  # child, whose ending is run_watched's business alone.
+  trap night_observer_stop EXIT
+}
+
+# night_observer_stop -- TERM, then CONFIRM gone before saying so, then a KILL
+# for a supervisor that ignored the TERM. An unconfirmed kill would leave the
+# morning log asserting a stop that never happened, and a second lane
+# electing itself while the first one is still holding the flock.
+night_observer_stop() {
+  local pid="${NIGHT_OBSERVER_PID:-}" waited=0
+  [ -n "$pid" ] || return 0
+  NIGHT_OBSERVER_PID=""
+  # THE WHOLE KILL-AND-REAP runs with this shell's stderr discarded, not just
+  # the kill. The line an operator was seeing --
+  #   lib/watch.sh: line NN: <pid> Terminated: 15
+  # -- is written by BASH when it reaps the job, i.e. inside `wait`, not by
+  # `kill`, so a redirect on the kill alone silenced nothing. That stream is
+  # the claude child's for the whole night (the output rule at the top of this
+  # file), and a full-screen TUI does not need baton's job table.
+  #
+  # A `{ } 2>/dev/null` group rather than a subshell, because `waited` is
+  # assigned in here and a subshell would throw the assignment away; and
+  # `wait` is kept rather than dropped, because reaping IS the confirmation
+  # that the pid is gone rather than a zombie the next `kill -0` would still
+  # answer for.
+  {
+    kill -TERM "$pid"
+    while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 30 ]; do
+      sleep 0.1; waited=$((waited + 1))
+    done
+    kill -0 "$pid" 2>/dev/null && kill -KILL "$pid"
+    wait "$pid"
+  } 2>/dev/null
+  handoff_log "OBSERVER: stopped pid=$pid"
+}
+
 # night_knobs -- resolve --night's three numeric env knobs ONCE, before any
 # child is launched, or die. Unset or empty keeps the documented default;
 # anything else must be a number, because all three fail PAST baton's error
@@ -706,6 +790,11 @@ night_mode() {
     done
     [ "$ctx_has_autocompact" -eq 0 ] && set -- ${@+"$@"} --autocompact 100k
   fi
+
+  # After the ctx arm, before the first pick: the observer watches the RUN,
+  # not an account, so it is started once for the whole night and outlives
+  # every handoff inside it.
+  night_observer_start
 
   pick_live probe || die_no_live_account "" ""
   acct="$PICKED"

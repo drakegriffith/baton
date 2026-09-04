@@ -374,3 +374,83 @@ Feature: Automatic account failover when a running session hits its usage limit
     And a snapshot of the real $HOME/.claude-accounts directory (if any) is taken before the run
     When I run the full scenario suite in this feature
     Then the real $HOME/.claude-accounts directory is byte-for-byte, mtime-for-mtime unchanged after the run
+
+  # --- 9. The wave-wake observer supervisor -------------------------------
+  #
+  #   D9. A --night lane dispatched with PATHWAY_PICKUP set belongs to a
+  #       wave-wake run, and baton starts that run's observer supervisor
+  #       alongside it: `PYTHONPATH=<repo root> <target> observe --supervise
+  #       --run-dir <D> --interval 60`, where <target> defaults to
+  #       $HOME/code/pathway/pathway/wave_wake.py, <repo root> is
+  #       dirname(dirname(target)), and D is the directory holding
+  #       PATHWAY_PICKUP. BATON_WAVE_WAKE_TARGET overrides the target and is
+  #       a TEST SEAM, not an operator knob.
+  #       baton takes NO lock around it: the supervisor holds its own flock
+  #       inside D and elects the one active process itself, so one per
+  #       terminal is correct and a second claim layer here would only be a
+  #       second staleness rule over the same fact.
+  #       A missing target NEVER blocks a lane -- one witness line in the
+  #       handoff log ("OBSERVER: target absent <path>") plus a warn on
+  #       stderr, and the launch continues. The observer is started ONCE per
+  #       night, before the first account is picked, so it outlives every
+  #       handoff, and it is killed exactly once on every way out of
+  #       night_mode (child exited, exhaustion, handoff cap, cap stop).
+  #       `baton --observe <run-id-or-dir>` runs the same command in the
+  #       foreground for a terminal launched without PATHWAY_*.
+  #       The reap is silent: bash announces a job it reaps, and that stderr
+  #       belongs to the claude child all night (issue #2), so the kill and
+  #       the wait run with this shell's stderr discarded and the durable stop
+  #       row goes to the handoff log instead.
+  #       LIMIT, on the record rather than discovered at 3am: the reap is an
+  #       EXIT trap, so a baton that is itself SIGKILLed reaps nothing and
+  #       leaves the supervisor running. That orphan keeps observing and keeps
+  #       holding the flock, which is the safe direction (a wake that keeps
+  #       waking beats one that silently stopped) -- but nothing reclaims it:
+  #       the next `baton --night` over that run dir stands by rather than
+  #       taking over, and a human has to kill the orphan by the pid in
+  #       <run-dir>/observer.pid.
+  #
+  # These scenarios are driven by tests/unit/observe_test.sh rather than a
+  # tests/scenarios file, because they need a fake OBSERVER target as well as
+  # a fake claude.
+
+  @observer
+  Scenario: A night lane with PATHWAY_PICKUP set starts the observer, and reaps it
+    Given PATHWAY_PICKUP points at a pickup file inside a run directory
+    And the observer target exists
+    When I run "baton --night"
+    Then the observer is started once with the exact observe argv for that run directory
+    And its stdout and stderr are appended to "<run-dir>/observer.log"
+    And the handoff log records "OBSERVER: started pid=<n> run_dir=<D>"
+    And it is still alive after the run hands off from account "a" to account "b"
+    And it is confirmed dead once baton's own process leaves night mode
+    And the handoff log records exactly one observer start and exactly one observer stop
+
+  @observer
+  Scenario: PATHWAY_PICKUP unset launches no observer at all
+    Given PATHWAY_PICKUP is not set
+    When I run "baton --night"
+    Then the observer target never runs
+    And the handoff log says nothing about an observer
+
+  @observer
+  Scenario: A missing observer target leaves a witness and never blocks the lane
+    Given PATHWAY_PICKUP is set and the observer target does not exist
+    When I run "baton --night"
+    Then the handoff log carries "OBSERVER: target absent <path>"
+    And the claude child is launched anyway
+    And baton exits with the child's own code
+
+  @observer
+  Scenario: baton --observe runs the same supervisor in the foreground
+    Given a run directory "<state>/wave-wake/run-77" containing run.json
+    When I run "baton --observe run-77"
+    Then the observer replaces the baton process (exec, not a child)
+    And its argv names that resolved run directory
+
+  @observer
+  Scenario: baton --observe refuses a directory that is not a run directory
+    Given a directory that exists and holds no run.json
+    When I run "baton --observe <that directory>"
+    Then baton exits nonzero with one line naming run.json
+    And no observer is started
