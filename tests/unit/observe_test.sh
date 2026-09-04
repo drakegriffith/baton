@@ -99,6 +99,16 @@ check "pickup set: the night still exited normally" \
   $([ "$night_rc" -eq 0 ] && [ "${NIGHT_EXIT:-1}" -eq 0 ]; echo $?)
 wait_for_gone "$obs_pid" 5
 check "pickup set: the observer is dead once baton's child is done" $?
+# The reap must be SILENT. bash announces the death of a job it reaps
+# ("<pid> Terminated: 15") on the shell's own stderr, and watch.sh's header
+# rule is that this stream belongs to the claude child: a night lane shares
+# one terminal with a full-screen TUI all night. The positive control is the
+# second half -- a "no such text" assertion over an empty stream found
+# nothing because it read nothing.
+check "pickup set: stderr was actually inspected (positive control)" \
+  $([ "$(grep -c . "$SCRATCH/night.err")" -gt 0 ]; echo $?)
+check "pickup set: no job-control notice reaches the lane's stderr" \
+  $(! grep -qiE "terminated|killed|signal 15" "$SCRATCH/night.err"; echo $?)
 stop_night 2>/dev/null
 cleanup_root
 

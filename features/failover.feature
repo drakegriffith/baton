@@ -397,6 +397,18 @@ Feature: Automatic account failover when a running session hits its usage limit
   #       night_mode (child exited, exhaustion, handoff cap, cap stop).
   #       `baton --observe <run-id-or-dir>` runs the same command in the
   #       foreground for a terminal launched without PATHWAY_*.
+  #       The reap is silent: bash announces a job it reaps, and that stderr
+  #       belongs to the claude child all night (issue #2), so the kill and
+  #       the wait run with this shell's stderr discarded and the durable stop
+  #       row goes to the handoff log instead.
+  #       LIMIT, on the record rather than discovered at 3am: the reap is an
+  #       EXIT trap, so a baton that is itself SIGKILLed reaps nothing and
+  #       leaves the supervisor running. That orphan keeps observing and keeps
+  #       holding the flock, which is the safe direction (a wake that keeps
+  #       waking beats one that silently stopped) -- but nothing reclaims it:
+  #       the next `baton --night` over that run dir stands by rather than
+  #       taking over, and a human has to kill the orphan by the pid in
+  #       <run-dir>/observer.pid.
   #
   # These scenarios are driven by tests/unit/observe_test.sh rather than a
   # tests/scenarios file, because they need a fake OBSERVER target as well as

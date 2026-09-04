@@ -81,12 +81,27 @@ night_observer_stop() {
   local pid="${NIGHT_OBSERVER_PID:-}" waited=0
   [ -n "$pid" ] || return 0
   NIGHT_OBSERVER_PID=""
-  kill -TERM "$pid" 2>/dev/null
-  while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 30 ]; do
-    sleep 0.1; waited=$((waited + 1))
-  done
-  kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null
-  wait "$pid" 2>/dev/null
+  # THE WHOLE KILL-AND-REAP runs with this shell's stderr discarded, not just
+  # the kill. The line an operator was seeing --
+  #   lib/watch.sh: line NN: <pid> Terminated: 15
+  # -- is written by BASH when it reaps the job, i.e. inside `wait`, not by
+  # `kill`, so a redirect on the kill alone silenced nothing. That stream is
+  # the claude child's for the whole night (the output rule at the top of this
+  # file), and a full-screen TUI does not need baton's job table.
+  #
+  # A `{ } 2>/dev/null` group rather than a subshell, because `waited` is
+  # assigned in here and a subshell would throw the assignment away; and
+  # `wait` is kept rather than dropped, because reaping IS the confirmation
+  # that the pid is gone rather than a zombie the next `kill -0` would still
+  # answer for.
+  {
+    kill -TERM "$pid"
+    while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 30 ]; do
+      sleep 0.1; waited=$((waited + 1))
+    done
+    kill -0 "$pid" 2>/dev/null && kill -KILL "$pid"
+    wait "$pid"
+  } 2>/dev/null
   handoff_log "OBSERVER: stopped pid=$pid"
 }
 
