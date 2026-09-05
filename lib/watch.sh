@@ -338,11 +338,40 @@ EOF
   printf '%s %s\n' "$3" "$2"
 }
 
+# classify_transcript_line TEXT -- only assistant/system JSON records can
+# describe CLI trouble. Tool results and other roles describe the lane's work.
+# Non-JSON text retains the legacy classifier; the role gate does not change
+# how eligible raw text is classified or how compaction checkpoints arm.
+classify_transcript_line() {
+  if printf '%s' "$1" | python3 -c '
+import json, sys
+try:
+    record = json.load(sys.stdin)
+except ValueError:
+    sys.exit(0)
+sys.exit(0 if isinstance(record, dict) and record.get("type") in ("assistant", "system") else 1)
+'; then
+    classify_text "$1"
+  else
+    echo UNKNOWN
+  fi
+}
+
+# confirm_transcript_auth ACCOUNT -- a transcript match is only a suspicion.
+# probe uses a separate cwd and a bounded headless call. Disconnect stdin so
+# it cannot consume lane input. Its existing dead/alive marks still apply;
+# LIMIT, ALIVE and UNKNOWN all leave this child running on this AUTH path.
+confirm_transcript_auth() {
+  probe "$1" </dev/null
+  [ "$PROBE_CLASS" = AUTH ] && return 0
+  handoff_log "false-auth-suppressed account=$1 probe=$PROBE_CLASS"
+  return 1
+}
+
 # run_watched NAME RESUME_MODE ARGS... -- launch NAME under its resolved env
 # with RESUME_MODE ("" | "resume:<id>" | "continue") prefixed onto ARGS, then
 # either wait for it to exit naturally or kill it the instant its transcript
-# shows LIMIT/AUTH (classifying the RAW line text per D3 -- schema-agnostic
-# on purpose, since the JSON shape of a limit event is unverified). This is
+# shows LIMIT or probe-confirmed AUTH (eligible RAW line text per D3). This is
 # the one deep function that owns the whole watch-or-reap decision: splitting
 # "watch the transcript" from "decide what a kill vs. a natural exit means"
 # would just be two functions passing the same five pieces of state back and
@@ -607,8 +636,13 @@ run_watched() {
             soft_armed_at=$(now)
             soft_file="$f"
           fi
-          class=$(classify_text "$line")
+          class=$(classify_transcript_line "$line")
           if [ "$class" = LIMIT ] || [ "$class" = AUTH ]; then
+            # Confirm before TERM: after run_watched returns ROTATE the child
+            # is already gone, so night_mode cannot suppress a false kill.
+            if [ "$class" = AUTH ] && ! confirm_transcript_auth "$name"; then
+              continue
+            fi
             kill -TERM "$pid" 2>/dev/null
             wait "$pid" 2>/dev/null
             rm -f "$ref" "$snap"
