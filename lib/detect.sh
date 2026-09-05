@@ -18,7 +18,7 @@ classify_text() { # $1 raw text -> LIMIT|AUTH|UNKNOWN
   local text="$1"
   if printf '%s' "$text" | grep -qiE 'hit your .*limit|usage limit|limit reached'; then
     echo LIMIT
-  elif printf '%s' "$text" | grep -qiE 'not logged in|please run /login|invalid api key|authentication'; then
+  elif printf '%s' "$text" | grep -qiE 'not logged in|please run /login|invalid api key|oauth token (has )?expired'; then
     echo AUTH
   else
     echo UNKNOWN

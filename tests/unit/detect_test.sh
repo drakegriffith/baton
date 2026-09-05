@@ -31,8 +31,16 @@ check_class "ordinary-chatter"      "Here is the code you asked for..." UNKNOWN
 check_class "empty-string"          "" UNKNOWN
 check_class "case-insensitive-auth" "NOT LOGGED IN, please authenticate" AUTH
 check_class "multiline-json-line"   '{"type":"assistant","text":"You have HIT YOUR USAGE LIMIT, resets 9am"}' LIMIT
-check_class "auth-word-only"        "authentication required before continuing" AUTH
+check_class "auth-word-only"        "authentication required before continuing" UNKNOWN
 check_class "limit-word-not-alone"  "there is a rate limiter but nothing about usage" UNKNOWN
+
+# Authentication as task subject matter is not evidence about this account.
+check_class "auth-lookup-prose" 'the authentication lookup - resolveSeededUser' UNKNOWN
+check_class "auth-markdown-heading" '### Authentication' UNKNOWN
+check_class "auth-method-error" 'Could not resolve authentication method. Expected ANTHROPIC_API_KEY' UNKNOWN
+check_class "auth-cli-positive-control" 'Invalid API key - Please run /login' AUTH
+check_class "auth-oauth-expired" 'OAuth token expired' AUTH
+check_class "auth-oauth-has-expired" 'OAuth token has expired' AUTH
 
 check_reset() { # $1 name, $2 text, $3 grep pattern the epoch must satisfy ("gt-now" or "eq-0")
   local epoch now

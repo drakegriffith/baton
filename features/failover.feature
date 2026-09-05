@@ -12,7 +12,7 @@
 #   D2. Detection contract (shared by probe() and the watcher) is exactly:
 #         classify_text(TEXT) ->
 #           LIMIT   if TEXT matches   hit your .*limit|usage limit|limit reached   (case-insensitive)
-#           AUTH    else if TEXT matches  not logged in|please run /login|invalid api key|authentication  (case-insensitive)
+#           AUTH    else if TEXT matches  not logged in|please run /login|invalid api key|oauth token (has )?expired  (case-insensitive)
 #           UNKNOWN otherwise
 #       This is a total partition: every TEXT maps to exactly one class, and
 #       classify_text() has no knowledge of accounts, processes, or files
@@ -21,12 +21,19 @@
 #       probe reply contains "ok") -- ALIVE is a probe()-only concept and is
 #       not part of the shared contract, because the watcher is never probing
 #       for a canary reply, only watching for trouble.
-#   D3. The watcher classifies the RAW transcript line text (the whole JSONL
+#   D3. Only JSON records with top-level type assistant or system are eligible
+#       for trouble classification. Other JSON roles, including user tool
+#       results, are ignored. Non-JSON lines retain the raw-text fallback.
+#       The watcher classifies the RAW eligible text (the whole JSONL
 #       line, undecoded), never a parsed sub-field -- the exact JSON shape of
 #       a limit event is UNVERIFIED per .ab/DOC.md, so the contract is
 #       deliberately schema-agnostic and reuses the exact same regex family
 #       probe() already uses on raw claude stdout/stderr.
-#   D4. AUTH is treated the same as LIMIT for rotation purposes in --night
+#   D4. Transcript AUTH requires a fresh probe of the CURRENT account to
+#       return AUTH before the child is killed. Any other probe class logs
+#       false-auth-suppressed and watching continues. Post-exit AUTH already
+#       comes from that account's probe and needs no second confirmation.
+#       Confirmed AUTH is treated the same as LIMIT for rotation in --night
 #       mode (both post-exit probe and live-transcript watch): an
 #       account that is logged out is exactly as useless overnight as one
 #       that is rate-limited, so both drive a handoff. Only LIMIT and AUTH are

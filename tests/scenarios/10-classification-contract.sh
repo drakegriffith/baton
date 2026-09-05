@@ -23,7 +23,9 @@ EOF
 
   # -- call site 2: the --night transcript watcher -----------------------
   fresh_root
-  write_behavior a <<'EOF'
+  # Transcript AUTH now needs the current account's fresh probe to agree.
+  write_behavior a <<EOF
+STEP_STDOUT=("ok" "$text")
 STEP_EXIT=(0)
 STEP_TRANSCRIPT=("sess-outline")
 STEP_BLOCK=(1)
